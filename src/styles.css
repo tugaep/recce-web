@@ -1,0 +1,235 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-ring-offset-background: var(--background);
+  --color-surface: var(--surface);
+  --color-hairline: var(--hairline);
+  --color-lavender: var(--lavender);
+  --color-lavender-soft: var(--lavender-soft);
+  --color-graphite: var(--graphite);
+
+  --font-display: "Helvetica Neue", "Helvetica", "Arial", sans-serif;
+  --font-sans: "Helvetica Neue", "Helvetica", "Arial", sans-serif;
+}
+
+:root {
+  --radius: 0;
+
+  /* Bold pastel dreamy-brutalist */
+  --background: oklch(0.96 0.02 80);
+  --foreground: oklch(0.22 0.06 285);
+
+  --surface: oklch(0.92 0.05 295);
+  --hairline: oklch(0.35 0.06 285);
+
+  --card: oklch(0.95 0.03 290);
+  --card-foreground: oklch(0.22 0.06 285);
+  --popover: oklch(0.95 0.03 290);
+  --popover-foreground: oklch(0.22 0.06 285);
+
+  --primary: oklch(0.58 0.18 295);
+  --primary-foreground: oklch(0.97 0.01 85);
+
+  --secondary: oklch(0.88 0.07 300);
+  --secondary-foreground: oklch(0.28 0.06 285);
+
+  --muted: oklch(0.91 0.04 295);
+  --muted-foreground: oklch(0.48 0.05 285);
+
+  --accent: oklch(0.85 0.09 350);
+  --accent-foreground: oklch(0.3 0.1 340);
+
+  --destructive: oklch(0.6 0.2 25);
+  --destructive-foreground: oklch(0.97 0.01 85);
+
+  --border: oklch(0.35 0.06 285);
+  --input: oklch(0.45 0.06 285);
+  --ring: oklch(0.58 0.18 295);
+
+  --lavender: oklch(0.58 0.18 295);
+  --lavender-soft: oklch(0.82 0.1 300);
+  --graphite: oklch(0.22 0.06 285);
+
+  /* Bold dreamy tokens */
+  --gradient-mist: linear-gradient(
+    180deg,
+    oklch(0.96 0.02 80) 0%,
+    oklch(0.91 0.06 295) 100%
+  );
+  --gradient-aura: radial-gradient(
+    60% 60% at 50% 40%,
+    oklch(0.85 0.1 300) 0%,
+    oklch(0.96 0.02 80) 70%
+  );
+  --gradient-lavender: linear-gradient(
+    135deg,
+    oklch(0.62 0.14 290) 0%,
+    oklch(0.75 0.1 310) 100%
+  );
+
+  --shadow-soft: none;
+  --shadow-elegant: none;
+  --shadow-hairline: 0 1px 0 0 oklch(0.35 0.06 285);
+
+  --ease-luxe: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.dark {
+  --background: oklch(0.18 0.03 285);
+  --foreground: oklch(0.95 0.02 290);
+  --surface: oklch(0.24 0.04 290);
+  --hairline: oklch(0.7 0.06 295);
+  --card: oklch(0.22 0.035 290);
+  --card-foreground: oklch(0.95 0.02 290);
+  --popover: oklch(0.22 0.035 290);
+  --popover-foreground: oklch(0.95 0.02 290);
+  --primary: oklch(0.72 0.16 295);
+  --primary-foreground: oklch(0.18 0.03 285);
+  --secondary: oklch(0.3 0.05 290);
+  --secondary-foreground: oklch(0.95 0.02 290);
+  --muted: oklch(0.28 0.04 290);
+  --muted-foreground: oklch(0.68 0.04 295);
+  --accent: oklch(0.35 0.08 350);
+  --accent-foreground: oklch(0.9 0.06 350);
+  --destructive: oklch(0.65 0.2 25);
+  --destructive-foreground: oklch(0.95 0.02 290);
+  --border: oklch(0.7 0.06 295);
+  --input: oklch(0.55 0.06 295);
+  --ring: oklch(0.72 0.16 295);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    font-feature-settings: "ss01", "cv11";
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-display);
+    letter-spacing: -0.01em;
+  }
+}
+
+@layer utilities {
+  .font-display {
+    font-family: var(--font-display);
+  }
+  .bg-aura {
+    background-image: var(--gradient-aura);
+  }
+  .bg-mist {
+    background-image: var(--gradient-mist);
+  }
+  .bg-lavender-gradient {
+    background-image: var(--gradient-lavender);
+  }
+  .shadow-soft {
+    box-shadow: var(--shadow-soft);
+  }
+  .shadow-elegant {
+    box-shadow: var(--shadow-elegant);
+  }
+  .ease-luxe {
+    transition-timing-function: var(--ease-luxe);
+  }
+  .grain {
+    position: relative;
+  }
+  .grain::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0.06;
+    mix-blend-mode: multiply;
+    background-image: radial-gradient(circle, oklch(0.22 0.06 285) 1px, transparent 1px);
+    background-size: 8px 8px;
+  }
+  .eyebrow {
+    font-family: var(--font-sans);
+    letter-spacing: 0.08em;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--foreground);
+    background-color: var(--background);
+    border: 2px solid var(--foreground);
+    padding: 0.25rem 0.6rem;
+    display: inline-block;
+  }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.animate-fade-up { animation: fade-up 0.9s var(--ease-luxe) both; }
+.animate-fade-in { animation: fade-in 0.9s var(--ease-luxe) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-up,
+  .animate-fade-in {
+    animation: none !important;
+  }
+  html { scroll-behavior: auto; }
+}

@@ -1,0 +1,406 @@
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { useMemo, useState } from "react";
+import { ArrowLeft, RotateCcw, Sparkles, ArrowRight } from "lucide-react";
+import { Nav } from "@/components/site/Nav";
+import { Footer } from "@/components/site/Footer";
+import { EyebrowLabel } from "@/components/site/EyebrowLabel";
+import { StreamingText } from "@/components/demo/StreamingText";
+import {
+  mockCharacters,
+  mockScenes,
+  mockWorld,
+  startingSuggestions,
+} from "@/data/mockStory";
+
+export const Route = createFileRoute("/demo")({
+  head: () => ({
+    meta: [
+      { title: "Recce — Demo playthrough" },
+      {
+        name: "description",
+        content:
+          "Experience a short, simulated Recce story: a cast, a world, and a choice-driven scene.",
+      },
+      { property: "og:title", content: "Recce — Demo playthrough" },
+      {
+        property: "og:description",
+        content: "A short interactive story preview from Recce.",
+      },
+    ],
+  }),
+  component: DemoPage,
+});
+
+type Stage = "idea" | "dreaming" | "reveal" | "play";
+
+type ChoiceTaken = { sceneTitle: string; choiceLabel: string };
+
+function DemoPage() {
+  const [stage, setStage] = useState<Stage>("idea");
+  const [idea, setIdea] = useState("");
+  const [sceneId, setSceneId] = useState<string>("start");
+  const [history, setHistory] = useState<ChoiceTaken[]>([]);
+
+  const scene = useMemo(() => mockScenes[sceneId], [sceneId]);
+
+  function submitIdea(value: string) {
+    const v = value.trim();
+    if (!v) return;
+    setIdea(v);
+    setStage("dreaming");
+    window.setTimeout(() => setStage("reveal"), 1700);
+  }
+
+  function chooseScene(choiceLabel: string, next: string) {
+    setHistory((h) => [...h, { sceneTitle: scene.title, choiceLabel }]);
+    setSceneId(next);
+  }
+
+  function restart() {
+    setStage("idea");
+    setIdea("");
+    setSceneId("start");
+    setHistory([]);
+  }
+
+  return (
+    <div className="relative min-h-screen bg-background text-foreground">
+      <Nav />
+
+      <div className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-[60vh] bg-aura" />
+
+      <main className="mx-auto max-w-5xl px-6 pb-24 pt-32">
+        {stage === "idea" && (
+          <section className="animate-fade-up">
+            <div className="text-center">
+              <EyebrowLabel>Begin</EyebrowLabel>
+              <h1 className="mt-5 font-display text-4xl font-light leading-tight sm:text-5xl">
+                What story would you like to live in?
+              </h1>
+              <p className="mx-auto mt-4 max-w-lg text-sm text-muted-foreground">
+                A premise, a feeling, a single image. The studio will do the rest.
+              </p>
+            </div>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                submitIdea(idea);
+              }}
+              className="mx-auto mt-12 max-w-2xl"
+            >
+              <div className="group border-2 border-hairline bg-surface p-2 transition-all duration-500 ease-luxe focus-within:border-[color:var(--lavender)]">
+                <textarea
+                  value={idea}
+                  onChange={(e) => setIdea(e.target.value)}
+                  rows={3}
+                  placeholder="A lighthouse keeper discovers a door in the cliffs…"
+                  className="w-full resize-none bg-transparent px-4 py-3 font-display text-lg leading-relaxed text-foreground placeholder:text-muted-foreground focus:outline-none"
+                />
+                <div className="flex items-center justify-between gap-2 px-2 pb-1 pt-1">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Sparkles className="h-3.5 w-3.5 text-[color:var(--lavender)]" />
+                    Press enter — or pick a starting point.
+                  </div>
+                  <button
+                    type="submit"
+                    className="inline-flex items-center gap-2 bg-foreground px-5 py-2 text-sm font-medium text-background transition-all"
+                  >
+                    Begin
+                    <ArrowRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-6 flex flex-wrap justify-center gap-2">
+                {startingSuggestions.map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => submitIdea(s)}
+                    className="border-2 border-hairline bg-background px-4 py-1.5 text-xs text-muted-foreground transition-all duration-500 ease-luxe hover:border-[color:var(--lavender)] hover:text-foreground"
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+            </form>
+          </section>
+        )}
+
+        {stage === "dreaming" && <DreamingLoader idea={idea} />}
+
+        {stage === "reveal" && (
+          <RevealStage idea={idea} onContinue={() => setStage("play")} onRestart={restart} />
+        )}
+
+        {stage === "play" && (
+          <ScenePlayer
+            sceneId={sceneId}
+            history={history}
+            onChoose={chooseScene}
+            onRestart={restart}
+            onBack={() => setStage("reveal")}
+          />
+        )}
+      </main>
+
+      <Footer />
+    </div>
+  );
+}
+
+function DreamingLoader({ idea }: { idea: string }) {
+  return (
+    <section className="mx-auto mt-24 max-w-xl text-center">
+      <EyebrowLabel>Recce is dreaming</EyebrowLabel>
+      <p className="mt-6 font-display text-2xl font-light italic leading-relaxed text-foreground">
+        “{idea}”
+      </p>
+      <div className="mx-auto mt-10 h-[2px] w-64 overflow-hidden bg-hairline">
+        <div
+          className="h-full w-1/3 bg-lavender-gradient"
+          style={{
+            backgroundSize: "200% 100%",
+            animation: "shimmer 1.6s linear infinite",
+          }}
+        />
+      </div>
+      <p className="mt-6 text-xs tracking-widest text-muted-foreground">
+        Assembling world · Casting characters · Lighting the first scene
+      </p>
+    </section>
+  );
+}
+
+function RevealStage({
+  idea,
+  onContinue,
+  onRestart,
+}: {
+  idea: string;
+  onContinue: () => void;
+  onRestart: () => void;
+}) {
+  return (
+    <section className="animate-fade-up">
+      <div className="flex items-center justify-between">
+        <EyebrowLabel>Your story</EyebrowLabel>
+        <button
+          onClick={onRestart}
+          className="inline-flex items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <RotateCcw className="h-3 w-3" /> Try a new idea
+        </button>
+      </div>
+      <h2 className="mt-4 font-display text-3xl font-light italic leading-tight text-foreground sm:text-4xl">
+        “{idea}”
+      </h2>
+
+      {/* World card */}
+      <article className="mt-12 overflow-hidden border-2 border-hairline bg-surface">
+        <div className="relative aspect-[16/8] w-full overflow-hidden">
+          <img
+            src={mockWorld.image}
+            alt={mockWorld.title}
+            className="h-full w-full object-cover"
+            loading="lazy"
+            width={1600}
+            height={900}
+          />
+          <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-background/80 via-transparent to-transparent" />
+        </div>
+        <div className="grid gap-8 p-8 md:grid-cols-3">
+          <div className="md:col-span-2">
+            <EyebrowLabel>The World</EyebrowLabel>
+            <h3 className="mt-3 font-display text-3xl font-light text-foreground">
+              {mockWorld.title}
+            </h3>
+            <p className="mt-1 text-sm text-muted-foreground">{mockWorld.era}</p>
+            <p className="mt-4 text-base leading-relaxed text-foreground">
+              {mockWorld.atmosphere}
+            </p>
+          </div>
+          <ul className="space-y-3 text-sm">
+            {mockWorld.rules.map((r) => (
+              <li key={r} className="flex gap-2 text-muted-foreground">
+                <span className="mt-2 inline-block h-1 w-1 bg-[color:var(--lavender)]" />
+                <span className="text-foreground">{r}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </article>
+
+      {/* Cast */}
+      <div className="mt-16">
+        <EyebrowLabel>The Cast</EyebrowLabel>
+        <div className="mt-6 grid gap-6 sm:grid-cols-2">
+          {mockCharacters.map((c) => (
+            <article
+              key={c.id}
+              className="group overflow-hidden border-2 border-hairline bg-surface transition-all duration-500 ease-luxe hover:border-[color:var(--lavender)]"
+            >
+              <div className="aspect-[4/5] overflow-hidden">
+                <img
+                  src={c.portrait}
+                  alt={c.name}
+                  loading="lazy"
+                  width={768}
+                  height={960}
+                  className="h-full w-full object-cover"
+                />
+              </div>
+              <div className="p-6">
+                <p className="eyebrow">{c.role}</p>
+                <h4 className="mt-2 font-display text-2xl font-light text-foreground">
+                  {c.name}
+                </h4>
+                <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+                  {c.backstory}
+                </p>
+                <div className="mt-4 flex flex-wrap gap-1.5">
+                  {c.traits.map((t) => (
+                    <span
+                      key={t}
+                      className="border-2 border-hairline bg-background px-3 py-1 text-[11px] tracking-wide text-foreground"
+                    >
+                      {t}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </article>
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-14 flex justify-center">
+        <button
+          onClick={onContinue}
+          className="group inline-flex items-center gap-2 bg-foreground px-7 py-3.5 text-sm font-medium text-background transition-all duration-500 ease-luxe"
+        >
+          Begin the first scene
+          <ArrowRight className="h-4 w-4 transition-transform duration-500 ease-luxe group-hover:translate-x-1" />
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function ScenePlayer({
+  sceneId,
+  history,
+  onChoose,
+  onRestart,
+  onBack,
+}: {
+  sceneId: string;
+  history: ChoiceTaken[];
+  onChoose: (label: string, next: string) => void;
+  onRestart: () => void;
+  onBack: () => void;
+}) {
+  const scene = mockScenes[sceneId];
+  const isEnd = scene.choices.length === 0;
+
+  return (
+    <section key={scene.id} className="animate-fade-in">
+      {/* breadcrumb */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+          <button
+            onClick={onBack}
+            className="inline-flex items-center gap-1 text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <ArrowLeft className="h-3 w-3" />
+            Cast & World
+          </button>
+          {history.map((h, i) => (
+            <span key={i} className="flex items-center gap-2">
+              <span className="text-[color:var(--lavender)]">›</span>
+              <span className="text-foreground">{h.choiceLabel}</span>
+            </span>
+          ))}
+        </div>
+        <button
+          onClick={onRestart}
+          className="inline-flex items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <RotateCcw className="h-3 w-3" /> Restart story
+        </button>
+      </div>
+
+      {/* image */}
+      <figure className="mt-6 overflow-hidden border-2 border-hairline">
+        <img
+          src={scene.image}
+          alt={scene.title}
+          loading="lazy"
+          width={1600}
+          height={900}
+          className="aspect-[16/9] w-full animate-fade-in object-cover"
+        />
+      </figure>
+
+      {/* narrative */}
+      <div className="mt-10 max-w-3xl">
+        <p className="eyebrow">{scene.chapter}</p>
+        <h2 className="mt-3 font-display text-3xl font-light leading-tight text-foreground sm:text-4xl">
+          {scene.title}
+        </h2>
+        <div className="mt-6">
+          <StreamingText text={scene.narrative} />
+        </div>
+      </div>
+
+      {/* choices or epilogue */}
+      {!isEnd ? (
+        <div className="mt-12">
+          <EyebrowLabel>Your move</EyebrowLabel>
+          <div className="mt-5 grid gap-4 sm:grid-cols-2">
+            {scene.choices.map((c) => (
+              <button
+                key={c.id}
+                onClick={() => onChoose(c.label, c.next)}
+                className="group relative overflow-hidden border-2 border-hairline bg-surface p-6 text-left transition-all duration-500 ease-luxe hover:border-[color:var(--lavender)] hover:bg-background"
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <h4 className="font-display text-xl font-normal text-foreground">
+                    {c.label}
+                  </h4>
+                  <ArrowRight className="mt-1 h-4 w-4 text-[color:var(--lavender)] transition-transform duration-500 ease-luxe group-hover:translate-x-1" />
+                </div>
+                <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+                  {c.hint}
+                </p>
+                <span className="absolute inset-x-6 bottom-3 h-px origin-left scale-x-0 bg-[color:var(--lavender)] transition-transform duration-500 ease-luxe group-hover:scale-x-100" />
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="mt-12 border-2 border-hairline bg-surface p-10 text-center">
+          <EyebrowLabel>End</EyebrowLabel>
+          <p className="mx-auto mt-5 max-w-md font-display text-2xl font-light italic leading-relaxed text-foreground">
+            {scene.ending}
+          </p>
+          <div className="mt-8 flex flex-wrap justify-center gap-3">
+            <button
+              onClick={onRestart}
+              className="inline-flex items-center gap-2 bg-foreground px-6 py-3 text-sm font-medium text-background transition-all"
+            >
+              <RotateCcw className="h-4 w-4" /> Try a new idea
+            </button>
+            <Link
+              to="/"
+              className="inline-flex items-center gap-2 border-2 border-hairline bg-background px-6 py-3 text-sm text-foreground transition-colors hover:border-[color:var(--lavender)]"
+            >
+              Back to home
+            </Link>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
