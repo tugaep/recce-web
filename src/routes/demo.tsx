@@ -1,16 +1,18 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
-import { ArrowLeft, RotateCcw, Sparkles, ArrowRight } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ArrowLeft, RotateCcw, Sparkles, ArrowRight, BookOpen } from "lucide-react";
 import { Nav } from "@/components/site/Nav";
 import { Footer } from "@/components/site/Footer";
 import { EyebrowLabel } from "@/components/site/EyebrowLabel";
 import { StreamingText } from "@/components/demo/StreamingText";
-import {
-  mockCharacters,
-  mockScenes,
-  mockWorld,
-  startingSuggestions,
-} from "@/data/mockStory";
+import { mockCharacters, mockScenes, mockWorld, startingSuggestions } from "@/data/mockStory";
+import { useWebSocket } from "@/hooks/useWebSocket";
+import type {
+  Character as WsCharacter,
+  Choice as WsChoice,
+  Scene as WsScene,
+  World as WsWorld,
+} from "@/hooks/useWebSocket";
 
 export const Route = createFileRoute("/demo")({
   head: () => ({
@@ -31,36 +33,85 @@ export const Route = createFileRoute("/demo")({
   component: DemoPage,
 });
 
-type Stage = "idea" | "dreaming" | "reveal" | "play";
+type Stage = "idea" | "dreaming" | "reveal" | "play" | "summary";
 
 type ChoiceTaken = { sceneTitle: string; choiceLabel: string };
+
+type SceneEntry = { scene: WsScene; choice: string | null };
 
 function DemoPage() {
   const [stage, setStage] = useState<Stage>("idea");
   const [idea, setIdea] = useState("");
-  const [sceneId, setSceneId] = useState<string>("start");
   const [history, setHistory] = useState<ChoiceTaken[]>([]);
 
-  const scene = useMemo(() => mockScenes[sceneId], [sceneId]);
+  const { sendMessage, lastMessage } = useWebSocket();
+
+  const [characters, setCharacters] = useState<WsCharacter[]>([]);
+  const [world, setWorld] = useState<WsWorld | null>(null);
+  const [currentScene, setCurrentScene] = useState<WsScene | null>(null);
+  const [choices, setChoices] = useState<WsChoice[]>([]);
+  const [isFinal, setIsFinal] = useState(false);
+  const [allScenes, setAllScenes] = useState<SceneEntry[]>([]);
+
+  useEffect(() => {
+    if (!lastMessage) return;
+    const msg = lastMessage as { type: string; payload: Record<string, unknown> };
+
+    if (msg.type === "story_started") {
+      const p = msg.payload as unknown as {
+        characters: WsCharacter[];
+        world: WsWorld;
+        scene: WsScene;
+        choices: WsChoice[];
+      };
+      setCharacters(p.characters);
+      setWorld(p.world);
+      setCurrentScene(p.scene);
+      setChoices(p.choices);
+      setAllScenes([{ scene: p.scene, choice: null }]);
+      setStage("reveal");
+    }
+
+    if (msg.type === "choice_applied") {
+      const p = msg.payload as unknown as {
+        scene: WsScene;
+        choices: WsChoice[];
+        is_final?: boolean;
+      };
+      setCurrentScene(p.scene);
+      setChoices(p.choices);
+      setIsFinal(Boolean(p.is_final));
+      setAllScenes((prev) => [...prev, { scene: p.scene, choice: null }]);
+      setStage("play");
+    }
+  }, [lastMessage]);
 
   function submitIdea(value: string) {
     const v = value.trim();
     if (!v) return;
     setIdea(v);
+    sendMessage("start_story", { idea: v });
     setStage("dreaming");
-    window.setTimeout(() => setStage("reveal"), 1700);
   }
 
-  function chooseScene(choiceLabel: string, next: string) {
-    setHistory((h) => [...h, { sceneTitle: scene.title, choiceLabel }]);
-    setSceneId(next);
+  function chooseScene(choiceLabel: string) {
+    setHistory((h) => [...h, { sceneTitle: currentScene?.location ?? "", choiceLabel }]);
+    setAllScenes((prev) =>
+      prev.map((s, i) => (i === prev.length - 1 ? { ...s, choice: choiceLabel } : s)),
+    );
+    sendMessage("make_choice", { choice: choiceLabel });
   }
 
   function restart() {
     setStage("idea");
     setIdea("");
-    setSceneId("start");
     setHistory([]);
+    setCharacters([]);
+    setWorld(null);
+    setCurrentScene(null);
+    setChoices([]);
+    setIsFinal(false);
+    setAllScenes([]);
   }
 
   return (
@@ -131,16 +182,35 @@ function DemoPage() {
         {stage === "dreaming" && <DreamingLoader idea={idea} />}
 
         {stage === "reveal" && (
-          <RevealStage idea={idea} onContinue={() => setStage("play")} onRestart={restart} />
+          <RevealStage
+            idea={idea}
+            world={world}
+            characters={characters}
+            onContinue={() => setStage("play")}
+            onRestart={restart}
+          />
         )}
 
         {stage === "play" && (
           <ScenePlayer
-            sceneId={sceneId}
+            currentScene={currentScene}
+            choices={choices}
             history={history}
+            isFinal={isFinal}
             onChoose={chooseScene}
             onRestart={restart}
             onBack={() => setStage("reveal")}
+            onViewSummary={() => setStage("summary")}
+          />
+        )}
+
+        {stage === "summary" && (
+          <StorySummary
+            idea={idea}
+            world={world}
+            characters={characters}
+            allScenes={allScenes}
+            onRestart={restart}
           />
         )}
       </main>
@@ -175,10 +245,14 @@ function DreamingLoader({ idea }: { idea: string }) {
 
 function RevealStage({
   idea,
+  world,
+  characters,
   onContinue,
   onRestart,
 }: {
   idea: string;
+  world: WsWorld | null;
+  characters: WsCharacter[];
   onContinue: () => void;
   onRestart: () => void;
 }) {
@@ -197,12 +271,12 @@ function RevealStage({
         “{idea}”
       </h2>
 
-      {/* World card */}
+      {/* World card — portrait imagery arrives with the visual-agents phase */}
       <article className="mt-12 overflow-hidden border-2 border-hairline bg-surface">
         <div className="relative aspect-[16/8] w-full overflow-hidden">
           <img
             src={mockWorld.image}
-            alt={mockWorld.title}
+            alt={world?.location_name ?? "The world"}
             className="h-full w-full object-cover"
             loading="lazy"
             width={1600}
@@ -214,21 +288,19 @@ function RevealStage({
           <div className="md:col-span-2">
             <EyebrowLabel>The World</EyebrowLabel>
             <h3 className="mt-3 font-display text-3xl font-light text-foreground">
-              {mockWorld.title}
+              {world?.location_name}
             </h3>
-            <p className="mt-1 text-sm text-muted-foreground">{mockWorld.era}</p>
-            <p className="mt-4 text-base leading-relaxed text-foreground">
-              {mockWorld.atmosphere}
-            </p>
+            <p className="mt-1 text-sm text-muted-foreground">{world?.time_period}</p>
+            <p className="mt-4 text-base leading-relaxed text-foreground">{world?.atmosphere}</p>
           </div>
-          <ul className="space-y-3 text-sm">
-            {mockWorld.rules.map((r) => (
-              <li key={r} className="flex gap-2 text-muted-foreground">
-                <span className="mt-2 inline-block h-1 w-1 bg-[color:var(--lavender)]" />
-                <span className="text-foreground">{r}</span>
-              </li>
-            ))}
-          </ul>
+          {world?.description && (
+            <div>
+              <EyebrowLabel>Lore</EyebrowLabel>
+              <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+                {world.description}
+              </p>
+            </div>
+          )}
         </div>
       </article>
 
@@ -236,42 +308,49 @@ function RevealStage({
       <div className="mt-16">
         <EyebrowLabel>The Cast</EyebrowLabel>
         <div className="mt-6 grid gap-6 sm:grid-cols-2">
-          {mockCharacters.map((c) => (
-            <article
-              key={c.id}
-              className="group overflow-hidden border-2 border-hairline bg-surface transition-all duration-500 ease-luxe hover:border-[color:var(--lavender)]"
-            >
-              <div className="aspect-[4/5] overflow-hidden">
-                <img
-                  src={c.portrait}
-                  alt={c.name}
-                  loading="lazy"
-                  width={768}
-                  height={960}
-                  className="h-full w-full object-cover"
-                />
-              </div>
-              <div className="p-6">
-                <p className="eyebrow">{c.role}</p>
-                <h4 className="mt-2 font-display text-2xl font-light text-foreground">
-                  {c.name}
-                </h4>
-                <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-                  {c.backstory}
-                </p>
-                <div className="mt-4 flex flex-wrap gap-1.5">
-                  {c.traits.map((t) => (
-                    <span
-                      key={t}
-                      className="border-2 border-hairline bg-background px-3 py-1 text-[11px] tracking-wide text-foreground"
-                    >
-                      {t}
-                    </span>
-                  ))}
+          {characters.map((c, i) => {
+            const mock = mockCharacters[i];
+            return (
+              <article
+                key={c.name ?? i}
+                className="group overflow-hidden border-2 border-hairline bg-surface transition-all duration-500 ease-luxe hover:border-[color:var(--lavender)]"
+              >
+                {mock?.portrait && (
+                  <div className="aspect-[4/5] overflow-hidden">
+                    <img
+                      src={mock.portrait}
+                      alt={c.name}
+                      loading="lazy"
+                      width={768}
+                      height={960}
+                      className="h-full w-full object-cover"
+                    />
+                  </div>
+                )}
+                <div className="p-6">
+                  {mock?.role && <p className="eyebrow">{mock.role}</p>}
+                  <h4 className="mt-2 font-display text-2xl font-light text-foreground">
+                    {c.name}
+                  </h4>
+                  <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+                    {c.description}
+                  </p>
+                  {mock?.traits && mock.traits.length > 0 && (
+                    <div className="mt-4 flex flex-wrap gap-1.5">
+                      {mock.traits.map((t) => (
+                        <span
+                          key={t}
+                          className="border-2 border-hairline bg-background px-3 py-1 text-[11px] tracking-wide text-foreground"
+                        >
+                          {t}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
-              </div>
-            </article>
-          ))}
+              </article>
+            );
+          })}
         </div>
       </div>
 
@@ -288,24 +367,40 @@ function RevealStage({
   );
 }
 
+const CHAPTER_LABELS = [
+  "Chapter I",
+  "Chapter II",
+  "Chapter III",
+  "Chapter IV",
+  "Chapter V",
+  "Chapter VI",
+  "Chapter VII",
+  "Chapter VIII",
+  "Chapter IX",
+  "Chapter X",
+];
+
 function ScenePlayer({
-  sceneId,
+  currentScene,
+  choices,
   history,
+  isFinal,
   onChoose,
   onRestart,
   onBack,
+  onViewSummary,
 }: {
-  sceneId: string;
+  currentScene: WsScene | null;
+  choices: WsChoice[];
   history: ChoiceTaken[];
-  onChoose: (label: string, next: string) => void;
+  isFinal: boolean;
+  onChoose: (label: string) => void;
   onRestart: () => void;
   onBack: () => void;
+  onViewSummary: () => void;
 }) {
-  const scene = mockScenes[sceneId];
-  const isEnd = scene.choices.length === 0;
-
   return (
-    <section key={scene.id} className="animate-fade-in">
+    <section key={history.length} className="animate-fade-in">
       {/* breadcrumb */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
@@ -331,11 +426,11 @@ function ScenePlayer({
         </button>
       </div>
 
-      {/* image */}
+      {/* image — scene illustrations arrive with the visual-agents phase */}
       <figure className="mt-6 overflow-hidden border-2 border-hairline">
         <img
-          src={scene.image}
-          alt={scene.title}
+          src={mockScenes["start"].image}
+          alt={currentScene?.location ?? "Scene"}
           loading="lazy"
           width={1600}
           height={900}
@@ -345,62 +440,207 @@ function ScenePlayer({
 
       {/* narrative */}
       <div className="mt-10 max-w-3xl">
-        <p className="eyebrow">{scene.chapter}</p>
+        <p className="eyebrow">
+          {isFinal
+            ? "Epilogue"
+            : (CHAPTER_LABELS[history.length] ?? `Chapter ${history.length + 1}`)}
+        </p>
         <h2 className="mt-3 font-display text-3xl font-light leading-tight text-foreground sm:text-4xl">
-          {scene.title}
+          {currentScene?.location ?? (isFinal ? "The End" : "The Story Continues")}
         </h2>
         <div className="mt-6">
-          <StreamingText text={scene.narrative} />
+          <StreamingText text={currentScene?.scene_text ?? ""} />
         </div>
       </div>
 
       {/* choices or epilogue */}
-      {!isEnd ? (
+      {isFinal ? (
+        <div className="mt-12 border-2 border-hairline bg-surface p-10 text-center">
+          <EyebrowLabel>End</EyebrowLabel>
+          <p className="mx-auto mt-5 max-w-md font-display text-2xl font-light italic leading-relaxed text-foreground">
+            Your story has reached its conclusion.
+          </p>
+          <div className="mt-8 flex justify-center">
+            <button
+              onClick={onViewSummary}
+              className="group inline-flex items-center gap-2 bg-foreground px-7 py-3.5 text-sm font-medium text-background transition-all duration-500 ease-luxe"
+            >
+              <BookOpen className="h-4 w-4" />
+              View your story
+              <ArrowRight className="h-4 w-4 transition-transform duration-500 ease-luxe group-hover:translate-x-1" />
+            </button>
+          </div>
+        </div>
+      ) : (
         <div className="mt-12">
           <EyebrowLabel>Your move</EyebrowLabel>
           <div className="mt-5 grid gap-4 sm:grid-cols-2">
-            {scene.choices.map((c) => (
+            {choices.map((c, i) => (
               <button
-                key={c.id}
-                onClick={() => onChoose(c.label, c.next)}
+                key={i}
+                onClick={() => onChoose(c.choice_text)}
                 className="group relative overflow-hidden border-2 border-hairline bg-surface p-6 text-left transition-all duration-500 ease-luxe hover:border-[color:var(--lavender)] hover:bg-background"
               >
                 <div className="flex items-start justify-between gap-4">
                   <h4 className="font-display text-xl font-normal text-foreground">
-                    {c.label}
+                    {c.choice_text}
                   </h4>
                   <ArrowRight className="mt-1 h-4 w-4 text-[color:var(--lavender)] transition-transform duration-500 ease-luxe group-hover:translate-x-1" />
                 </div>
                 <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-                  {c.hint}
+                  {c.consequence}
                 </p>
                 <span className="absolute inset-x-6 bottom-3 h-px origin-left scale-x-0 bg-[color:var(--lavender)] transition-transform duration-500 ease-luxe group-hover:scale-x-100" />
               </button>
             ))}
           </div>
         </div>
-      ) : (
-        <div className="mt-12 border-2 border-hairline bg-surface p-10 text-center">
-          <EyebrowLabel>End</EyebrowLabel>
-          <p className="mx-auto mt-5 max-w-md font-display text-2xl font-light italic leading-relaxed text-foreground">
-            {scene.ending}
-          </p>
-          <div className="mt-8 flex flex-wrap justify-center gap-3">
-            <button
-              onClick={onRestart}
-              className="inline-flex items-center gap-2 bg-foreground px-6 py-3 text-sm font-medium text-background transition-all"
-            >
-              <RotateCcw className="h-4 w-4" /> Try a new idea
-            </button>
-            <Link
-              to="/"
-              className="inline-flex items-center gap-2 border-2 border-hairline bg-background px-6 py-3 text-sm text-foreground transition-colors hover:border-[color:var(--lavender)]"
-            >
-              Back to home
-            </Link>
-          </div>
-        </div>
       )}
+    </section>
+  );
+}
+
+function StorySummary({
+  idea,
+  world,
+  characters,
+  allScenes,
+  onRestart,
+}: {
+  idea: string;
+  world: WsWorld | null;
+  characters: WsCharacter[];
+  allScenes: SceneEntry[];
+  onRestart: () => void;
+}) {
+  return (
+    <section className="animate-fade-up">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <EyebrowLabel>Your story</EyebrowLabel>
+        <button
+          onClick={onRestart}
+          className="inline-flex items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <RotateCcw className="h-3 w-3" /> Try a new idea
+        </button>
+      </div>
+      <h2 className="mt-4 font-display text-3xl font-light italic leading-tight text-foreground sm:text-4xl">
+        “{idea}”
+      </h2>
+
+      {/* World */}
+      <article className="mt-12 overflow-hidden border-2 border-hairline bg-surface">
+        <div className="relative aspect-[16/8] w-full overflow-hidden">
+          <img
+            src={mockWorld.image}
+            alt={world?.location_name ?? "The world"}
+            className="h-full w-full object-cover"
+            loading="lazy"
+            width={1600}
+            height={900}
+          />
+          <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-background/80 via-transparent to-transparent" />
+        </div>
+        <div className="p-8">
+          <EyebrowLabel>The World</EyebrowLabel>
+          <h3 className="mt-3 font-display text-3xl font-light text-foreground">
+            {world?.location_name}
+          </h3>
+          <p className="mt-1 text-sm text-muted-foreground">{world?.time_period}</p>
+          <p className="mt-4 text-base leading-relaxed text-foreground">{world?.atmosphere}</p>
+        </div>
+      </article>
+
+      {/* Cast */}
+      <div className="mt-16">
+        <EyebrowLabel>The Cast</EyebrowLabel>
+        <div className="mt-6 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+          {characters.map((c, i) => {
+            const mock = mockCharacters[i];
+            return (
+              <article
+                key={c.name ?? i}
+                className="overflow-hidden border-2 border-hairline bg-surface"
+              >
+                {mock?.portrait && (
+                  <div className="aspect-[4/5] overflow-hidden">
+                    <img
+                      src={mock.portrait}
+                      alt={c.name}
+                      loading="lazy"
+                      width={768}
+                      height={960}
+                      className="h-full w-full object-cover"
+                    />
+                  </div>
+                )}
+                <div className="p-5">
+                  <h4 className="font-display text-lg font-light text-foreground">{c.name}</h4>
+                  <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
+                    {c.description}
+                  </p>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Story flow */}
+      <div className="mt-16">
+        <EyebrowLabel>The Story</EyebrowLabel>
+        <div className="mt-8">
+          {allScenes.map((entry, i) => {
+            const isLast = i === allScenes.length - 1;
+            return (
+              <div key={i}>
+                <div
+                  className={
+                    isLast
+                      ? "border-2 border-[color:var(--lavender)] bg-surface p-6"
+                      : "border-2 border-hairline bg-surface p-6"
+                  }
+                >
+                  <p className="eyebrow mb-3">
+                    {isLast ? "The End" : (CHAPTER_LABELS[i] ?? `Chapter ${i + 1}`)}
+                  </p>
+                  <p className="text-sm leading-relaxed text-foreground">
+                    {entry.scene?.scene_text}
+                  </p>
+                </div>
+
+                {entry.choice && (
+                  <div className="flex items-center gap-3 py-4 pl-6">
+                    <span className="inline-block h-px w-6 bg-[color:var(--lavender)]" />
+                    <span className="text-sm font-medium text-[color:var(--lavender)]">
+                      → {entry.choice}
+                    </span>
+                  </div>
+                )}
+
+                {!entry.choice && !isLast && <div className="h-4" />}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Footer */}
+      <div className="mt-16 flex flex-wrap justify-center gap-3">
+        <button
+          onClick={onRestart}
+          className="inline-flex items-center gap-2 bg-foreground px-6 py-3 text-sm font-medium text-background transition-all"
+        >
+          <RotateCcw className="h-4 w-4" /> Try a new idea
+        </button>
+        <Link
+          to="/"
+          className="inline-flex items-center gap-2 border-2 border-hairline bg-background px-6 py-3 text-sm text-foreground transition-colors hover:border-[color:var(--lavender)]"
+        >
+          Back to home
+        </Link>
+      </div>
     </section>
   );
 }

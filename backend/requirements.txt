@@ -1,0 +1,17 @@
+# Recce backend — Python 3.11+
+# Story-agent pipeline (LangGraph) with all model calls routed through fal.
+
+fastapi
+uvicorn[standard]
+websockets
+python-dotenv
+
+# Agent orchestration (LangGraph only — no langchain-anthropic; fal replaces it)
+langgraph
+
+# Model access: Claude Sonnet 4.6 via fal (openrouter/router endpoint)
+fal-client
+
+# Persistence: Supabase (async client) + its Postgrest dependency
+supabase
+postgrest

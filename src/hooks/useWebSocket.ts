@@ -1,0 +1,165 @@
+import { useEffect, useRef, useState, useCallback } from "react";
+
+// WebSocket URL configuration from Vite environment variables with fallback
+const WS_URL = (import.meta.env.VITE_WS_URL as string) || "ws://localhost:8000/ws";
+
+// Message Payload Type Definitions
+export interface Character {
+  name: string;
+  description: string;
+}
+
+export interface Choice {
+  choice_text: string;
+  consequence: string;
+}
+
+export interface Scene {
+  scene_text: string;
+  location: string;
+}
+
+export interface World {
+  location_name: string;
+  atmosphere: string;
+  time_period: string;
+  description: string;
+}
+
+export interface StoryStartedPayload {
+  session_id: string;
+  scene: Scene;
+  choices: Choice[];
+  characters: Character[];
+  world: World;
+}
+
+export interface ChoiceAppliedPayload {
+  session_id: string;
+  scene: Scene;
+  choices: Choice[];
+}
+
+export interface WebSocketMessage {
+  type: string;
+  payload: unknown;
+}
+
+/**
+ * Custom hook to manage WebSocket connection to the storytelling backend.
+ * Handles automatic reconnection, message sending, and message parsing.
+ */
+export function useWebSocket(): {
+  sendMessage: (type: string, payload: object) => void;
+  lastMessage: object | null;
+  isConnected: boolean;
+  isLoading: boolean;
+} {
+  const [isConnected, setIsConnected] = useState<boolean>(false);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [lastMessage, setLastMessage] = useState<object | null>(null);
+
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isUnmountedRef = useRef<boolean>(false);
+
+  const connect = useCallback(() => {
+    if (isUnmountedRef.current) return;
+    if (typeof window === "undefined") return;
+
+    setIsLoading(true);
+
+    // Clean up current WebSocket if it exists
+    if (wsRef.current) {
+      wsRef.current.onopen = null;
+      wsRef.current.onmessage = null;
+      wsRef.current.onerror = null;
+      wsRef.current.onclose = null;
+      wsRef.current.close();
+    }
+
+    try {
+      const ws = new WebSocket(WS_URL);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (isUnmountedRef.current) return;
+        setIsConnected(true);
+        setIsLoading(false);
+      };
+
+      ws.onmessage = (event) => {
+        if (isUnmountedRef.current) return;
+        try {
+          const data = JSON.parse(event.data);
+          setLastMessage(data);
+        } catch (err) {
+          console.error("Failed to parse WebSocket message:", err);
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error("WebSocket error:", error);
+      };
+
+      ws.onclose = () => {
+        if (isUnmountedRef.current) return;
+        setIsConnected(false);
+        setIsLoading(false);
+
+        // Clear any pending reconnect attempts and schedule a new one
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current);
+        }
+        reconnectTimeoutRef.current = setTimeout(() => {
+          connect();
+        }, 3000);
+      };
+    } catch (err) {
+      console.error("Failed to establish WebSocket connection:", err);
+      setIsConnected(false);
+      setIsLoading(false);
+
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      reconnectTimeoutRef.current = setTimeout(() => {
+        connect();
+      }, 3000);
+    }
+  }, []);
+
+  const sendMessage = useCallback((type: string, payload: object) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type, payload }));
+    } else {
+      console.warn("WebSocket is not connected. Message not sent:", { type, payload });
+    }
+  }, []);
+
+  useEffect(() => {
+    isUnmountedRef.current = false;
+    connect();
+
+    return () => {
+      isUnmountedRef.current = true;
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (wsRef.current) {
+        wsRef.current.onopen = null;
+        wsRef.current.onmessage = null;
+        wsRef.current.onerror = null;
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+      }
+    };
+  }, [connect]);
+
+  return {
+    sendMessage,
+    lastMessage,
+    isConnected,
+    isLoading,
+  };
+}
