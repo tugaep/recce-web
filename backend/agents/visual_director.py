@@ -161,6 +161,34 @@ async def run_visual_director(
     }
 
 
+def build_scene_prompt(
+    style_guide: str,
+    scene_text: str,
+    location: str,
+    characters: list[Character],
+    world: WorldInfo | None,
+) -> str:
+    """
+    Compose a scene-illustration prompt deterministically — no LLM call.
+
+    The style guide is already established at story start, so per-scene images can
+    skip the Scene Director round-trip (~15s) and assemble a strong prompt from the
+    style guide + scene prose + cast. Keeps choices snappy.
+    """
+    cast = ", ".join(c.name for c in characters[:3])
+    where = location or (world.location_name if world else "")
+    # Trim prose to keep the prompt focused on the visible moment.
+    summary = " ".join((scene_text or "").split())[:320]
+    parts = [
+        style_guide.strip(),
+        f"Cinematic frame{f' at {where}' if where else ''}.",
+        summary,
+        f"Featuring {cast}." if cast else "",
+        "Single dramatic composition. No text, captions, watermarks, or UI.",
+    ]
+    return " ".join(p for p in parts if p)
+
+
 async def run_scene_director(
     style_guide: str,
     scene_text: str,

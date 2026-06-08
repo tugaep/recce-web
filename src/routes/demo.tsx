@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { ArrowLeft, RotateCcw, Sparkles, ArrowRight, BookOpen } from "lucide-react";
+import { ArrowLeft, RotateCcw, Sparkles, ArrowRight, BookOpen, Aperture } from "lucide-react";
 import { Nav } from "@/components/site/Nav";
 import { Footer } from "@/components/site/Footer";
 import { EyebrowLabel } from "@/components/site/EyebrowLabel";
@@ -268,24 +268,72 @@ function DemoPage() {
   );
 }
 
+// Cinematic phases shown in sequence while the story pipeline runs. Ordered to
+// mirror the backend: outline → cast/world → opening scene → lighting → roll.
+const DREAM_PHASES = [
+  "Reading your premise",
+  "Shaping the story",
+  "Casting the characters",
+  "Building the world",
+  "Writing the opening scene",
+  "Setting the lights",
+  "Rolling camera",
+];
+
 function DreamingLoader({ idea }: { idea: string }) {
+  const [phase, setPhase] = useState(0);
+
+  useEffect(() => {
+    const reduced =
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduced) return;
+    const id = window.setInterval(() => {
+      // Advance through phases, then hold on the last ("Rolling camera").
+      setPhase((p) => Math.min(p + 1, DREAM_PHASES.length - 1));
+    }, 3200);
+    return () => window.clearInterval(id);
+  }, []);
+
   return (
-    <section className="mx-auto mt-24 max-w-xl text-center">
-      <EyebrowLabel>Recce is dreaming</EyebrowLabel>
+    <section className="mx-auto mt-20 max-w-xl text-center">
+      {/* Animated aperture mark with a breathing aura and orbiting accents */}
+      <div className="relative mx-auto flex h-32 w-32 items-center justify-center">
+        <div className="absolute inset-0 animate-breathe rounded-full bg-aura blur-2xl" />
+        <div className="absolute inset-3 animate-spin-slow">
+          <span className="absolute left-1/2 top-0 h-1.5 w-1.5 -translate-x-1/2 rounded-full bg-[color:var(--lavender)]" />
+          <span className="absolute bottom-0 left-1/2 h-1 w-1 -translate-x-1/2 rounded-full bg-[color:var(--lavender-soft)]" />
+        </div>
+        <Aperture
+          className="animate-spin-slow relative h-14 w-14 text-[color:var(--lavender)]"
+          strokeWidth={1.25}
+        />
+      </div>
+
+      <div className="mt-8">
+        <EyebrowLabel>Recce is dreaming</EyebrowLabel>
+      </div>
       <p className="mt-6 font-display text-2xl font-light italic leading-relaxed text-foreground">
         “{idea}”
       </p>
-      <div className="mx-auto mt-10 h-[2px] w-64 overflow-hidden bg-hairline">
+
+      {/* Rotating phase — re-keyed so it fades on each change */}
+      <p
+        key={phase}
+        className="mt-8 animate-fade-in text-sm font-medium uppercase tracking-[0.2em] text-[color:var(--lavender)]"
+      >
+        {DREAM_PHASES[phase]}
+      </p>
+
+      {/* Progress track with a travelling dot */}
+      <div className="relative mx-auto mt-6 h-[2px] w-64 overflow-hidden bg-hairline">
         <div
           className="h-full w-1/3 bg-lavender-gradient"
-          style={{
-            backgroundSize: "200% 100%",
-            animation: "shimmer 1.6s linear infinite",
-          }}
+          style={{ backgroundSize: "200% 100%", animation: "shimmer 1.6s linear infinite" }}
         />
       </div>
-      <p className="mt-6 text-xs tracking-widest text-muted-foreground">
-        Assembling world · Casting characters · Lighting the first scene
+      <p className="mt-6 text-[11px] tracking-widest text-muted-foreground">
+        This takes a moment — every frame is generated just for you.
       </p>
     </section>
   );
@@ -330,6 +378,7 @@ function RevealStage({
             fallback={mockWorld.image}
             alt={world?.location_name ?? "The world"}
             aspectClass="aspect-[16/8]"
+            label="Painting the world"
             width={1600}
             height={900}
           />
@@ -372,6 +421,7 @@ function RevealStage({
                   fallback={mock?.portrait}
                   alt={c.name}
                   aspectClass="aspect-[4/5]"
+                  label={`Developing ${c.name}`}
                   width={768}
                   height={960}
                 />
@@ -484,6 +534,7 @@ function ScenePlayer({
           fallback={mockScenes["start"].image}
           alt={currentScene?.location ?? "Scene"}
           aspectClass="aspect-[16/9]"
+          label="Composing the scene"
           width={1600}
           height={900}
         />
@@ -591,6 +642,7 @@ function StorySummary({
             fallback={mockWorld.image}
             alt={world?.location_name ?? "The world"}
             aspectClass="aspect-[16/8]"
+            label="Painting the world"
             width={1600}
             height={900}
           />
@@ -623,6 +675,7 @@ function StorySummary({
                   fallback={mock?.portrait}
                   alt={c.name}
                   aspectClass="aspect-[4/5]"
+                  label={`Developing ${c.name}`}
                   width={768}
                   height={960}
                 />

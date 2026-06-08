@@ -24,7 +24,7 @@ from graph.state import NarrativeState
 from db.supabase_client import get_session, save_scene, save_session, update_session_state
 
 # Visual agents (Visual Director -> rendering artists -> continuity checker)
-from agents.visual_director import run_scene_director, run_visual_director
+from agents.visual_director import build_scene_prompt, run_visual_director
 from agents.character_portrait_artist import render_portrait
 from agents.world_environment_artist import render_environment
 from agents.scene_composer import render_scene
@@ -235,11 +235,10 @@ async def generate_scene_visual(
     if scene is None or not (scene.scene_text or "").strip():
         return
 
-    try:
-        prompt = await run_scene_director(style_guide, scene.scene_text, characters, world)
-    except Exception as exc:
-        logger.warning("Scene Director failed; skipping scene visual: %s", exc)
-        return
+    # Deterministic prompt from the established style guide — no LLM round-trip.
+    prompt = build_scene_prompt(
+        style_guide, scene.scene_text, scene.location, characters, world
+    )
 
     results = await _stream_renders(
         websocket, session_id, style_guide, [("scene", None, prompt, render_scene)]

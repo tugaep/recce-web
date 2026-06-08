@@ -223,12 +223,51 @@
   100% { background-position: 200% 0; }
 }
 
+/* A diagonal light sweeping across a surface — used on image skeletons to read
+   as a render "developing" rather than a flat placeholder. */
+@keyframes sweep {
+  0% { transform: translateX(-150%) skewX(-12deg); }
+  100% { transform: translateX(150%) skewX(-12deg); }
+}
+
+/* Slow continuous rotation for the aperture/film loader mark. */
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Soft breathing glow for the loader aura. */
+@keyframes breathe {
+  0%, 100% { opacity: 0.35; transform: scale(0.92); }
+  50% { opacity: 0.7; transform: scale(1.06); }
+}
+
+/* Gentle vertical drift for orbiting/floating accents. */
+@keyframes float-y {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+
+/* A small dot moving along a track — progress feel under the loader. */
+@keyframes track {
+  0% { left: 0; }
+  100% { left: 100%; }
+}
+
 .animate-fade-up { animation: fade-up 0.9s var(--ease-luxe) both; }
 .animate-fade-in { animation: fade-in 0.9s var(--ease-luxe) both; }
+.animate-sweep { animation: sweep 2.1s var(--ease-luxe) infinite; }
+.animate-spin-slow { animation: spin-slow 9s linear infinite; }
+.animate-breathe { animation: breathe 3.2s ease-in-out infinite; }
+.animate-float-y { animation: float-y 3s ease-in-out infinite; }
 
 @media (prefers-reduced-motion: reduce) {
   .animate-fade-up,
-  .animate-fade-in {
+  .animate-fade-in,
+  .animate-sweep,
+  .animate-spin-slow,
+  .animate-breathe,
+  .animate-float-y {
     animation: none !important;
   }
   html { scroll-behavior: auto; }
