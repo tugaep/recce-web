@@ -25,6 +25,8 @@ class Character:
     description: str  # Physical appearance and role summary
     personality: str  # Traits, motivations, and speech style
     backstory: str  # History and context before the story begins
+    image_prompt: Optional[str] = None  # Visual Director's gpt-image-2 prompt
+    image_url: Optional[str] = None  # Rendered portrait URL (fal CDN)
 
 
 @dataclass
@@ -35,6 +37,8 @@ class WorldInfo:
     atmosphere: str  # Mood and tone of the environment
     time_period: str  # Era or timeframe
     description: str  # Broader world-building details
+    image_prompt: Optional[str] = None  # Visual Director's gpt-image-2 prompt
+    image_url: Optional[str] = None  # Rendered establishing-shot URL (fal CDN)
 
 
 @dataclass
@@ -44,6 +48,7 @@ class Scene:
     scene_text: str  # Prose content shown to the user
     location: str  # Where the scene takes place
     status: str  # Lifecycle state (e.g. active, completed)
+    image_url: Optional[str] = None  # Rendered scene illustration URL (fal CDN)
 
 
 @dataclass

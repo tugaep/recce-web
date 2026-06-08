@@ -50,6 +50,23 @@ SCENES_TABLE = "scenes"
 # Lazily initialized async client (created on first database call)
 _client: Optional[AsyncClient] = None
 
+# ---------------------------------------------------------------------------
+# In-memory fallback
+# ---------------------------------------------------------------------------
+#
+# When Supabase isn't configured (no SUPABASE_URL/KEY), the app falls back to an
+# in-process store keyed by session_id. This keeps the local demo fully working
+# (start_story -> make_choice -> visuals) without any database. State lives only
+# for the lifetime of the server process — fine for a single live demo.
+#
+# Shape: {session_id: {"session": <row dict>, "scenes": [{"scene": <dict>}, ...]}}
+_MEMORY_DB: dict[str, dict[str, Any]] = {}
+
+
+def _use_memory() -> bool:
+    """True when Supabase is not configured — use the in-memory store instead."""
+    return not (SUPABASE_URL and SUPABASE_KEY)
+
 
 class SupabaseConfigError(Exception):
     """Raised when required Supabase environment variables are missing."""
@@ -119,16 +136,22 @@ async def save_session(
     Raises:
         SupabaseOperationError: On insert failure or invalid configuration.
     """
+    row: dict[str, Any] = {
+        "id": session_id,
+        "user_idea": user_idea,
+        "scene_count": scene_count,
+        "story_outline": story_outline or {},
+        "characters": characters or [],
+        "world": world or {},
+    }
+
+    if _use_memory():
+        _MEMORY_DB[session_id] = {"session": row, "scenes": []}
+        logger.info("save_session (in-memory) for %s", session_id)
+        return row
+
     try:
         client = await get_client()
-        row: dict[str, Any] = {
-            "id": session_id,
-            "user_idea": user_idea,
-            "scene_count": scene_count,
-            "story_outline": story_outline or {},
-            "characters": characters or [],
-            "world": world or {},
-        }
         response = await (
             client.table(SESSIONS_TABLE).insert(row).execute()
         )
@@ -160,6 +183,11 @@ async def save_scene(session_id: str, scene: dict[str, Any]) -> dict[str, Any]:
     Raises:
         SupabaseOperationError: On insert failure or invalid configuration.
     """
+    if _use_memory():
+        entry = _MEMORY_DB.setdefault(session_id, {"session": {}, "scenes": []})
+        entry["scenes"].append({"scene": scene})
+        return {"session_id": session_id, "scene": scene}
+
     try:
         client = await get_client()
         row = {"session_id": session_id, "scene": scene}
@@ -178,6 +206,66 @@ async def save_scene(session_id: str, scene: dict[str, Any]) -> dict[str, Any]:
         raise SupabaseOperationError("Failed to save scene.") from exc
 
 
+def _parse_session(
+    session_row: dict[str, Any],
+    raw_scenes: List[dict[str, Any]],
+    session_id: str,
+) -> dict[str, Any]:
+    """
+    Parse a raw session row + scene rows into the enriched session shape.
+
+    Shared by the Supabase and in-memory code paths so both return identical,
+    richly-typed objects (Character/WorldInfo/Scene with image fields).
+    """
+    raw_characters: List[dict] = session_row.get("characters") or []
+    characters: List[Character] = [
+        Character(
+            name=c.get("name", ""),
+            description=c.get("description", ""),
+            personality=c.get("personality", ""),
+            backstory=c.get("backstory", ""),
+            image_prompt=c.get("image_prompt"),
+            image_url=c.get("image_url"),
+        )
+        for c in raw_characters
+    ]
+
+    raw_world: Optional[dict] = session_row.get("world") or None
+    world: Optional[WorldInfo] = (
+        WorldInfo(
+            location_name=raw_world.get("location_name", ""),
+            atmosphere=raw_world.get("atmosphere", ""),
+            time_period=raw_world.get("time_period", ""),
+            description=raw_world.get("description", ""),
+            image_prompt=raw_world.get("image_prompt"),
+            image_url=raw_world.get("image_url"),
+        )
+        if raw_world
+        else None
+    )
+
+    scene_history: List[Scene] = [
+        Scene(
+            scene_text=row["scene"].get("scene_text", ""),
+            location=row["scene"].get("location", ""),
+            status=row["scene"].get("status", ""),
+            image_url=row["scene"].get("image_url"),
+        )
+        for row in raw_scenes
+        if isinstance(row.get("scene"), dict)
+    ]
+
+    return {
+        **session_row,
+        "session_id": session_row.get("id", session_id),
+        "scene_count": session_row.get("scene_count", 0),
+        "story_outline": session_row.get("story_outline") or {},
+        "characters": characters,
+        "world": world,
+        "scene_history": scene_history,
+    }
+
+
 async def get_session(session_id: str) -> Optional[dict[str, Any]]:
     """
     Load a story session and all of its scenes, ordered by creation time.
@@ -194,6 +282,12 @@ async def get_session(session_id: str) -> Optional[dict[str, Any]]:
           - ``scene_history`` (list[Scene]) — parsed from the scenes table
         Returns None if the session is not found; logs and returns None on errors.
     """
+    if _use_memory():
+        entry = _MEMORY_DB.get(session_id)
+        if not entry:
+            return None
+        return _parse_session(entry.get("session") or {}, entry.get("scenes") or [], session_id)
+
     try:
         client = await get_client()
 
@@ -217,51 +311,7 @@ async def get_session(session_id: str) -> Optional[dict[str, Any]]:
         )
         raw_scenes = scenes_response.data or []
 
-        # --- Parse characters into Character dataclasses ---
-        raw_characters: List[dict] = session_row.get("characters") or []
-        characters: List[Character] = [
-            Character(
-                name=c.get("name", ""),
-                description=c.get("description", ""),
-                personality=c.get("personality", ""),
-                backstory=c.get("backstory", ""),
-            )
-            for c in raw_characters
-        ]
-
-        # --- Parse world into WorldInfo dataclass ---
-        raw_world: Optional[dict] = session_row.get("world") or None
-        world: Optional[WorldInfo] = (
-            WorldInfo(
-                location_name=raw_world.get("location_name", ""),
-                atmosphere=raw_world.get("atmosphere", ""),
-                time_period=raw_world.get("time_period", ""),
-                description=raw_world.get("description", ""),
-            )
-            if raw_world
-            else None
-        )
-
-        # --- Parse scenes into Scene dataclasses (scene_history) ---
-        scene_history: List[Scene] = [
-            Scene(
-                scene_text=row["scene"].get("scene_text", ""),
-                location=row["scene"].get("location", ""),
-                status=row["scene"].get("status", ""),
-            )
-            for row in raw_scenes
-            if isinstance(row.get("scene"), dict)
-        ]
-
-        return {
-            **session_row,
-            "session_id": session_row.get("id", session_id),
-            "scene_count": session_row.get("scene_count", 0),
-            "story_outline": session_row.get("story_outline") or {},
-            "characters": characters,
-            "world": world,
-            "scene_history": scene_history,
-        }
+        return _parse_session(session_row, raw_scenes, session_id)
     except SupabaseConfigError:
         raise
     except PostgrestAPIError as exc:
@@ -295,14 +345,20 @@ async def update_session_state(
     Raises:
         SupabaseOperationError: On update failure or invalid configuration.
     """
+    payload: dict[str, Any] = {
+        "scene_count": scene_count,
+        "story_outline": story_outline,
+        "characters": characters,
+        "world": world,
+    }
+
+    if _use_memory():
+        entry = _MEMORY_DB.setdefault(session_id, {"session": {"id": session_id}, "scenes": []})
+        entry["session"].update(payload)
+        return entry["session"]
+
     try:
         client = await get_client()
-        payload: dict[str, Any] = {
-            "scene_count": scene_count,
-            "story_outline": story_outline,
-            "characters": characters,
-            "world": world,
-        }
         response = await (
             client.table(SESSIONS_TABLE)
             .update(payload)

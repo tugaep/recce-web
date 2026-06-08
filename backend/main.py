@@ -7,10 +7,11 @@ integration will be wired in later; handlers currently return placeholders.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
-from typing import Any
+from typing import Any, Awaitable, Callable, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -21,6 +22,13 @@ from dataclasses import asdict
 from graph.graph import run_continuation, run_narrative
 from graph.state import NarrativeState
 from db.supabase_client import get_session, save_scene, save_session, update_session_state
+
+# Visual agents (Visual Director -> rendering artists -> continuity checker)
+from agents.visual_director import run_scene_director, run_visual_director
+from agents.character_portrait_artist import render_portrait
+from agents.world_environment_artist import render_environment
+from agents.scene_composer import render_scene
+from agents.visual_continuity_checker import run_continuity_check
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
@@ -71,6 +79,172 @@ async def health() -> dict[str, str]:
 async def send_message(websocket: WebSocket, message_type: str, payload: Any) -> None:
     """Send a JSON envelope with type and payload fields."""
     await websocket.send_json({"type": message_type, "payload": payload})
+
+
+# ---------------------------------------------------------------------------
+# Visual agents — render + stream image URLs over the socket
+# ---------------------------------------------------------------------------
+
+# Signature shared by the rendering artists: prompt -> image URL.
+Renderer = Callable[[str], Awaitable[str]]
+
+
+async def _stream_renders(
+    websocket: WebSocket,
+    session_id: str,
+    style_guide: str,
+    jobs: list[tuple[str, Optional[int], str, Renderer]],
+) -> dict[tuple[str, Optional[int]], Optional[str]]:
+    """
+    Run render jobs concurrently, emitting an ``image_ready`` the moment each
+    image renders — then refine it in the background via the continuity checker.
+
+    ``jobs`` is a list of ``(target, index, prompt, render_fn)``. For each job:
+      1. render the image and emit ``image_ready`` immediately (fastest UX), then
+      2. run a best-effort continuity check; if it flags an inconsistency,
+         regenerate once and emit again — the frontend replaces the prior image.
+
+    Socket sends are serialized with a lock so frames never interleave. Returns a
+    map of ``(target, index) -> final url`` for persistence.
+    """
+    lock = asyncio.Lock()
+    results: dict[tuple[str, Optional[int]], Optional[str]] = {}
+
+    async def emit(target: str, index: Optional[int], url: Optional[str], error: str | None = None) -> None:
+        payload: dict[str, Any] = {
+            "session_id": session_id,
+            "target": target,
+            "index": index,
+            "url": url,
+        }
+        if error:
+            payload["error"] = error
+        async with lock:
+            await send_message(websocket, "image_ready", payload)
+
+    async def run_job(target: str, index: Optional[int], prompt: str, render_fn: Renderer) -> None:
+        try:
+            url = await render_fn(prompt)
+        except Exception as exc:  # rendering failed — tell the UI to stop the skeleton
+            logger.exception("Render failed for target=%s index=%s", target, index)
+            await emit(target, index, None, str(exc))
+            return
+
+        results[(target, index)] = url
+        await emit(target, index, url)  # show it as soon as it exists
+
+        # Best-effort continuity refinement (never blocks the already-shown image).
+        try:
+            check = await run_continuity_check(style_guide, prompt)
+            revised = check.get("revised_prompt") or prompt
+            if not check.get("consistent", True) and revised != prompt:
+                refined = await render_fn(revised)
+                results[(target, index)] = refined
+                await emit(target, index, refined)  # frontend swaps to the refined image
+        except Exception:
+            logger.warning("Continuity refine failed for %s; keeping first render", target)
+
+    await asyncio.gather(
+        *(run_job(target, index, prompt, fn) for (target, index, prompt, fn) in jobs if prompt)
+    )
+    return results
+
+
+async def generate_initial_visuals(
+    websocket: WebSocket,
+    session_id: str,
+    *,
+    story_outline: dict,
+    characters: list,
+    world: Any,
+    scene: Any,
+) -> None:
+    """
+    Story-start visual pass: Visual Director -> render cast/world/scene -> stream.
+
+    Sends ``image_ready`` per image as it finishes, then re-persists the session
+    with image prompts/URLs and the style guide (so continuation turns stay
+    visually consistent). Fail-open: any error leaves the text experience intact.
+    """
+    if not characters or world is None:
+        return
+
+    try:
+        plan = await run_visual_director(story_outline or {}, characters, world)
+    except Exception as exc:
+        logger.warning("Visual Director failed; skipping initial visuals: %s", exc)
+        return
+
+    style_guide = plan["style_guide"]
+    story_outline["visual_style_guide"] = style_guide
+
+    # Attach prompts onto the domain objects for persistence.
+    char_prompts = plan.get("characters") or []
+    for i, c in enumerate(characters):
+        if i < len(char_prompts):
+            c.image_prompt = char_prompts[i].get("prompt") or None
+    world.image_prompt = (plan.get("world") or {}).get("prompt") or None
+    scene_prompt = (plan.get("scene") or {}).get("prompt") or ""
+
+    jobs: list[tuple[str, Optional[int], str, Renderer]] = []
+    for i, c in enumerate(characters):
+        if c.image_prompt:
+            jobs.append(("character", i, c.image_prompt, render_portrait))
+    if world.image_prompt:
+        jobs.append(("world", None, world.image_prompt, render_environment))
+    if scene_prompt:
+        jobs.append(("scene", None, scene_prompt, render_scene))
+
+    results = await _stream_renders(websocket, session_id, style_guide, jobs)
+
+    # Record URLs back onto the objects.
+    for i, c in enumerate(characters):
+        c.image_url = results.get(("character", i))
+    world.image_url = results.get(("world", None))
+    if scene is not None:
+        scene.image_url = results.get(("scene", None))
+
+    # Persist the enriched session (style guide + image prompts/URLs).
+    try:
+        await update_session_state(
+            session_id,
+            scene_count=0,
+            story_outline=story_outline,
+            characters=[asdict(c) for c in characters],
+            world=asdict(world),
+        )
+    except Exception as exc:
+        logger.warning("Failed to persist visual data for %s: %s", session_id, exc)
+
+
+async def generate_scene_visual(
+    websocket: WebSocket,
+    session_id: str,
+    *,
+    style_guide: str,
+    scene: Any,
+    characters: list,
+    world: Any,
+) -> None:
+    """
+    Continuation visual pass: Scene Director -> Scene Composer -> stream one image.
+
+    Reuses the established ``style_guide`` so the new scene matches prior images.
+    Fail-open: any error simply omits the scene image.
+    """
+    if scene is None or not (scene.scene_text or "").strip():
+        return
+
+    try:
+        prompt = await run_scene_director(style_guide, scene.scene_text, characters, world)
+    except Exception as exc:
+        logger.warning("Scene Director failed; skipping scene visual: %s", exc)
+        return
+
+    results = await _stream_renders(
+        websocket, session_id, style_guide, [("scene", None, prompt, render_scene)]
+    )
+    scene.image_url = results.get(("scene", None))
 
 
 def _placeholder_story_started(idea: str, session_id: str) -> dict[str, Any]:
@@ -185,6 +359,16 @@ async def handle_start_story(
         },
     )
 
+    # Visual layer: generate and stream images now that the text is on screen.
+    await generate_initial_visuals(
+        websocket,
+        session_id,
+        story_outline=story_outline,
+        characters=final_state.get("characters") or [],
+        world=final_state.get("world"),
+        scene=final_state.get("current_scene"),
+    )
+
 
 async def handle_make_choice(
     websocket: WebSocket, payload: dict[str, Any], session_id: str
@@ -279,6 +463,17 @@ async def handle_make_choice(
         ]
 
     await send_message(websocket, "choice_applied", response)
+
+    # Visual layer: stream the scene illustration, reusing the saved style guide.
+    style_guide = (final_state.get("story_outline") or {}).get("visual_style_guide", "")
+    await generate_scene_visual(
+        websocket,
+        session_id,
+        style_guide=style_guide,
+        scene=final_state.get("current_scene"),
+        characters=final_state.get("characters") or [],
+        world=final_state.get("world"),
+    )
 
 
 # ---------------------------------------------------------------------------

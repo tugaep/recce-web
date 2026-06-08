@@ -5,14 +5,22 @@ import { Nav } from "@/components/site/Nav";
 import { Footer } from "@/components/site/Footer";
 import { EyebrowLabel } from "@/components/site/EyebrowLabel";
 import { StreamingText } from "@/components/demo/StreamingText";
+import { StoryImage } from "@/components/demo/StoryImage";
 import { mockCharacters, mockScenes, mockWorld, startingSuggestions } from "@/data/mockStory";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import type {
   Character as WsCharacter,
   Choice as WsChoice,
+  ImageReadyPayload,
   Scene as WsScene,
   World as WsWorld,
 } from "@/hooks/useWebSocket";
+import {
+  applyImageReady,
+  emptyVisualState,
+  resetScene,
+  type VisualState,
+} from "@/lib/visualState";
 
 export const Route = createFileRoute("/demo")({
   head: () => ({
@@ -33,7 +41,7 @@ export const Route = createFileRoute("/demo")({
   component: DemoPage,
 });
 
-type Stage = "idea" | "dreaming" | "reveal" | "play" | "summary";
+type Stage = "idea" | "dreaming" | "reveal" | "play" | "summary" | "error";
 
 type ChoiceTaken = { sceneTitle: string; choiceLabel: string };
 
@@ -52,6 +60,8 @@ function DemoPage() {
   const [choices, setChoices] = useState<WsChoice[]>([]);
   const [isFinal, setIsFinal] = useState(false);
   const [allScenes, setAllScenes] = useState<SceneEntry[]>([]);
+  const [visuals, setVisuals] = useState<VisualState>(emptyVisualState);
+  const [errorMsg, setErrorMsg] = useState("");
 
   useEffect(() => {
     if (!lastMessage) return;
@@ -69,6 +79,7 @@ function DemoPage() {
       setCurrentScene(p.scene);
       setChoices(p.choices);
       setAllScenes([{ scene: p.scene, choice: null }]);
+      setVisuals(emptyVisualState);
       setStage("reveal");
     }
 
@@ -82,7 +93,21 @@ function DemoPage() {
       setChoices(p.choices);
       setIsFinal(Boolean(p.is_final));
       setAllScenes((prev) => [...prev, { scene: p.scene, choice: null }]);
+      // New scene begins rendering — clear the prior scene image, keep cast/world.
+      setVisuals((prev) => resetScene(prev));
       setStage("play");
+    }
+
+    if (msg.type === "image_ready") {
+      const p = msg.payload as unknown as ImageReadyPayload;
+      setVisuals((prev) => applyImageReady(prev, p));
+    }
+
+    if (msg.type === "error") {
+      const p = msg.payload as { message?: string };
+      setErrorMsg(p?.message || "Something went wrong while building your story.");
+      // Only the generation phase has nothing to show — surface a recoverable screen.
+      setStage((s) => (s === "dreaming" ? "error" : s));
     }
   }, [lastMessage]);
 
@@ -112,6 +137,8 @@ function DemoPage() {
     setChoices([]);
     setIsFinal(false);
     setAllScenes([]);
+    setVisuals(emptyVisualState);
+    setErrorMsg("");
   }
 
   return (
@@ -181,11 +208,30 @@ function DemoPage() {
 
         {stage === "dreaming" && <DreamingLoader idea={idea} />}
 
+        {stage === "error" && (
+          <section className="mx-auto mt-24 max-w-xl text-center animate-fade-up">
+            <EyebrowLabel>Something interrupted the dream</EyebrowLabel>
+            <p className="mt-6 font-display text-2xl font-light leading-relaxed text-foreground">
+              The studio couldn’t finish building your story.
+            </p>
+            {errorMsg && <p className="mx-auto mt-4 max-w-md text-sm text-muted-foreground">{errorMsg}</p>}
+            <div className="mt-10 flex justify-center">
+              <button
+                onClick={restart}
+                className="inline-flex items-center gap-2 bg-foreground px-6 py-3 text-sm font-medium text-background transition-all"
+              >
+                <RotateCcw className="h-4 w-4" /> Try again
+              </button>
+            </div>
+          </section>
+        )}
+
         {stage === "reveal" && (
           <RevealStage
             idea={idea}
             world={world}
             characters={characters}
+            visuals={visuals}
             onContinue={() => setStage("play")}
             onRestart={restart}
           />
@@ -197,6 +243,7 @@ function DemoPage() {
             choices={choices}
             history={history}
             isFinal={isFinal}
+            visuals={visuals}
             onChoose={chooseScene}
             onRestart={restart}
             onBack={() => setStage("reveal")}
@@ -210,6 +257,7 @@ function DemoPage() {
             world={world}
             characters={characters}
             allScenes={allScenes}
+            visuals={visuals}
             onRestart={restart}
           />
         )}
@@ -247,12 +295,14 @@ function RevealStage({
   idea,
   world,
   characters,
+  visuals,
   onContinue,
   onRestart,
 }: {
   idea: string;
   world: WsWorld | null;
   characters: WsCharacter[];
+  visuals: VisualState;
   onContinue: () => void;
   onRestart: () => void;
 }) {
@@ -271,14 +321,15 @@ function RevealStage({
         “{idea}”
       </h2>
 
-      {/* World card — portrait imagery arrives with the visual-agents phase */}
+      {/* World card — image streams in from the World & Environment Artist */}
       <article className="mt-12 overflow-hidden border-2 border-hairline bg-surface">
-        <div className="relative aspect-[16/8] w-full overflow-hidden">
-          <img
-            src={mockWorld.image}
+        <div className="relative">
+          <StoryImage
+            url={visuals.world}
+            failed={Boolean(visuals.failed["world"])}
+            fallback={mockWorld.image}
             alt={world?.location_name ?? "The world"}
-            className="h-full w-full object-cover"
-            loading="lazy"
+            aspectClass="aspect-[16/8]"
             width={1600}
             height={900}
           />
@@ -315,18 +366,15 @@ function RevealStage({
                 key={c.name ?? i}
                 className="group overflow-hidden border-2 border-hairline bg-surface transition-all duration-500 ease-luxe hover:border-[color:var(--lavender)]"
               >
-                {mock?.portrait && (
-                  <div className="aspect-[4/5] overflow-hidden">
-                    <img
-                      src={mock.portrait}
-                      alt={c.name}
-                      loading="lazy"
-                      width={768}
-                      height={960}
-                      className="h-full w-full object-cover"
-                    />
-                  </div>
-                )}
+                <StoryImage
+                  url={visuals.characters[i] ?? null}
+                  failed={Boolean(visuals.failed[`character:${i}`])}
+                  fallback={mock?.portrait}
+                  alt={c.name}
+                  aspectClass="aspect-[4/5]"
+                  width={768}
+                  height={960}
+                />
                 <div className="p-6">
                   {mock?.role && <p className="eyebrow">{mock.role}</p>}
                   <h4 className="mt-2 font-display text-2xl font-light text-foreground">
@@ -385,6 +433,7 @@ function ScenePlayer({
   choices,
   history,
   isFinal,
+  visuals,
   onChoose,
   onRestart,
   onBack,
@@ -394,6 +443,7 @@ function ScenePlayer({
   choices: WsChoice[];
   history: ChoiceTaken[];
   isFinal: boolean;
+  visuals: VisualState;
   onChoose: (label: string) => void;
   onRestart: () => void;
   onBack: () => void;
@@ -426,15 +476,16 @@ function ScenePlayer({
         </button>
       </div>
 
-      {/* image — scene illustrations arrive with the visual-agents phase */}
+      {/* image — scene illustration streams in from the Scene Composer */}
       <figure className="mt-6 overflow-hidden border-2 border-hairline">
-        <img
-          src={mockScenes["start"].image}
+        <StoryImage
+          url={visuals.scene}
+          failed={Boolean(visuals.failed["scene"])}
+          fallback={mockScenes["start"].image}
           alt={currentScene?.location ?? "Scene"}
-          loading="lazy"
+          aspectClass="aspect-[16/9]"
           width={1600}
           height={900}
-          className="aspect-[16/9] w-full animate-fade-in object-cover"
         />
       </figure>
 
@@ -505,12 +556,14 @@ function StorySummary({
   world,
   characters,
   allScenes,
+  visuals,
   onRestart,
 }: {
   idea: string;
   world: WsWorld | null;
   characters: WsCharacter[];
   allScenes: SceneEntry[];
+  visuals: VisualState;
   onRestart: () => void;
 }) {
   return (
@@ -531,12 +584,13 @@ function StorySummary({
 
       {/* World */}
       <article className="mt-12 overflow-hidden border-2 border-hairline bg-surface">
-        <div className="relative aspect-[16/8] w-full overflow-hidden">
-          <img
-            src={mockWorld.image}
+        <div className="relative">
+          <StoryImage
+            url={visuals.world}
+            failed={Boolean(visuals.failed["world"])}
+            fallback={mockWorld.image}
             alt={world?.location_name ?? "The world"}
-            className="h-full w-full object-cover"
-            loading="lazy"
+            aspectClass="aspect-[16/8]"
             width={1600}
             height={900}
           />
@@ -563,18 +617,15 @@ function StorySummary({
                 key={c.name ?? i}
                 className="overflow-hidden border-2 border-hairline bg-surface"
               >
-                {mock?.portrait && (
-                  <div className="aspect-[4/5] overflow-hidden">
-                    <img
-                      src={mock.portrait}
-                      alt={c.name}
-                      loading="lazy"
-                      width={768}
-                      height={960}
-                      className="h-full w-full object-cover"
-                    />
-                  </div>
-                )}
+                <StoryImage
+                  url={visuals.characters[i] ?? null}
+                  failed={Boolean(visuals.failed[`character:${i}`])}
+                  fallback={mock?.portrait}
+                  alt={c.name}
+                  aspectClass="aspect-[4/5]"
+                  width={768}
+                  height={960}
+                />
                 <div className="p-5">
                   <h4 className="font-display text-lg font-light text-foreground">{c.name}</h4>
                   <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">

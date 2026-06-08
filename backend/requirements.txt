@@ -9,7 +9,8 @@ python-dotenv
 # Agent orchestration (LangGraph only — no langchain-anthropic; fal replaces it)
 langgraph
 
-# Model access: Claude Sonnet 4.6 via fal (openrouter/router endpoint)
+# Model access via fal: Claude Sonnet 4.6 text (openrouter/router) and
+# gpt-image-2 image generation (fal-ai/gpt-image-2) for the visual agents.
 fal-client
 
 # Persistence: Supabase (async client) + its Postgrest dependency
