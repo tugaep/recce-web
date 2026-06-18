@@ -14,7 +14,9 @@ from llm.fal_image import PORTRAIT_SIZE, generate_image
 logger = logging.getLogger(__name__)
 
 
-async def render_portrait(prompt: str) -> str:
+async def render_portrait(
+    prompt: str, model: str | None = None, quality: str | None = None
+) -> str:
     """Render a character portrait and return its URL. Raises on failure."""
     logger.info("Character Portrait Artist rendering portrait")
-    return await generate_image(prompt, image_size=PORTRAIT_SIZE)
+    return await generate_image(prompt, image_size=PORTRAIT_SIZE, model=model, quality=quality)

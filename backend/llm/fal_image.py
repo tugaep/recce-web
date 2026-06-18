@@ -48,15 +48,19 @@ async def generate_image(
     prompt: str,
     image_size: Union[str, dict[str, int], None] = None,
     quality: str | None = None,
+    model: str | None = None,
 ) -> str:
     """
-    Render a single image via fal's gpt-image-2 and return its URL.
+    Render a single image via fal and return its URL.
 
     Args:
         prompt: Full text-to-image prompt (the Visual Director writes these).
         image_size: Preset name (e.g. ``landscape_4_3``) or ``{"width", "height"}``.
                     Defaults to :data:`FAL_IMAGE_SIZE`.
-        quality: ``low`` | ``medium`` | ``high``. Defaults to :data:`FAL_IMAGE_QUALITY`.
+        quality: ``low`` | ``medium`` | ``high`` for gpt-image-2. Pass ``""`` or set the
+            module default empty to omit it entirely — fast diffusion models (e.g.
+            flux/schnell) reject the gpt-image-2 ``quality`` knob.
+        model: Optional fal model id; defaults to :data:`FAL_IMAGE_MODEL`.
 
     Returns:
         The first generated image's URL (hosted on fal's CDN).
@@ -72,27 +76,34 @@ async def generate_image(
     # Lazy import keeps the module importable without fal installed (tests/tooling).
     import fal_client
 
+    resolved_model = model or FAL_IMAGE_MODEL
+    resolved_quality = quality if quality is not None else FAL_IMAGE_QUALITY
+
     arguments: dict = {
         "prompt": prompt,
         "image_size": image_size if image_size is not None else FAL_IMAGE_SIZE,
-        "quality": quality if quality is not None else FAL_IMAGE_QUALITY,
         "num_images": 1,
         "output_format": "png",
     }
+    # Only gpt-image-2 takes `quality`; omit it for models that don't (keeps the
+    # fast-model preset from erroring on an unknown argument).
+    if resolved_quality:
+        arguments["quality"] = resolved_quality
 
-    result = await fal_client.subscribe_async(FAL_IMAGE_MODEL, arguments=arguments)
+    logger.info("fal image generate: model=%s quality=%s", resolved_model, resolved_quality or "-")
+    result = await fal_client.subscribe_async(resolved_model, arguments=arguments)
 
     images = (result or {}).get("images") or []
     if not images or not isinstance(images, list):
         raise ValueError(
-            f"fal image model returned no images (model={FAL_IMAGE_MODEL}); "
+            f"fal image model returned no images (model={resolved_model}); "
             f"raw keys: {sorted((result or {}).keys())}"
         )
 
     url = images[0].get("url") if isinstance(images[0], dict) else None
     if not isinstance(url, str) or not url.strip():
         raise ValueError(
-            f"fal image model returned no usable URL (model={FAL_IMAGE_MODEL})."
+            f"fal image model returned no usable URL (model={resolved_model})."
         )
 
     return url

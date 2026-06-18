@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import uuid
+from functools import partial
 from typing import Any, Awaitable, Callable, Optional
 
 from dotenv import load_dotenv
@@ -21,6 +23,7 @@ from dataclasses import asdict
 
 from graph.graph import run_continuation, run_narrative
 from graph.state import NarrativeState
+from llm.fal_llm import set_request_model
 from db.supabase_client import get_session, save_scene, save_session, update_session_state
 
 # Visual agents (Visual Director -> rendering artists -> continuity checker)
@@ -59,6 +62,49 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------------------------
+# Model presets
+# ---------------------------------------------------------------------------
+#
+# The frontend dropdowns send a preset KEY; we map it to a concrete fal id here.
+# This is an allowlist — an arbitrary model string never reaches fal (avoids abuse
+# / surprise cost). Ids are env-overridable so they can be re-pointed without code
+# changes. "balanced"/"standard" are the known-good defaults; faster and richer
+# options trade latency for output quality. The fast image model omits the
+# gpt-image-2 `quality` knob (empty string) since diffusion models reject it.
+
+TEXT_MODEL_PRESETS: dict[str, str] = {
+    "fast": os.getenv("FAL_LLM_MODEL_FAST", "anthropic/claude-haiku-4.5"),
+    "balanced": os.getenv("FAL_LLM_MODEL", "anthropic/claude-sonnet-4.6"),
+    "capable": os.getenv("FAL_LLM_MODEL_CAPABLE", "anthropic/claude-opus-4.1"),
+}
+DEFAULT_TEXT_PRESET = "balanced"
+
+IMAGE_MODEL_PRESETS: dict[str, tuple[str, str]] = {
+    "fast": (os.getenv("FAL_IMAGE_MODEL_FAST", "fal-ai/flux/schnell"), ""),
+    "standard": (os.getenv("FAL_IMAGE_MODEL", "fal-ai/gpt-image-2"), "low"),
+    "rich": (os.getenv("FAL_IMAGE_MODEL", "fal-ai/gpt-image-2"), "medium"),
+    "cinematic": (os.getenv("FAL_IMAGE_MODEL", "fal-ai/gpt-image-2"), "high"),
+}
+DEFAULT_IMAGE_PRESET = "standard"
+
+
+def resolve_text_model(preset: Any) -> str:
+    """Map a text preset key to a concrete model id (falls back to the default)."""
+    key = preset if isinstance(preset, str) and preset in TEXT_MODEL_PRESETS else DEFAULT_TEXT_PRESET
+    return TEXT_MODEL_PRESETS[key]
+
+
+def resolve_image_model(preset: Any) -> tuple[str, str]:
+    """Map an image preset key to a ``(model, quality)`` pair (falls back to default)."""
+    key = (
+        preset
+        if isinstance(preset, str) and preset in IMAGE_MODEL_PRESETS
+        else DEFAULT_IMAGE_PRESET
+    )
+    return IMAGE_MODEL_PRESETS[key]
+
 
 # ---------------------------------------------------------------------------
 # HTTP routes
@@ -158,6 +204,8 @@ async def generate_initial_visuals(
     characters: list,
     world: Any,
     scene: Any,
+    img_model: str | None = None,
+    img_quality: str | None = None,
 ) -> None:
     """
     Story-start visual pass: Visual Director -> render cast/world/scene -> stream.
@@ -186,14 +234,20 @@ async def generate_initial_visuals(
     world.image_prompt = (plan.get("world") or {}).get("prompt") or None
     scene_prompt = (plan.get("scene") or {}).get("prompt") or ""
 
+    # Bake the session's chosen image model/quality into each renderer so jobs keep
+    # the simple ``prompt -> url`` shape that _stream_renders expects.
+    portrait_fn = partial(render_portrait, model=img_model, quality=img_quality)
+    environment_fn = partial(render_environment, model=img_model, quality=img_quality)
+    scene_fn = partial(render_scene, model=img_model, quality=img_quality)
+
     jobs: list[tuple[str, Optional[int], str, Renderer]] = []
     for i, c in enumerate(characters):
         if c.image_prompt:
-            jobs.append(("character", i, c.image_prompt, render_portrait))
+            jobs.append(("character", i, c.image_prompt, portrait_fn))
     if world.image_prompt:
-        jobs.append(("world", None, world.image_prompt, render_environment))
+        jobs.append(("world", None, world.image_prompt, environment_fn))
     if scene_prompt:
-        jobs.append(("scene", None, scene_prompt, render_scene))
+        jobs.append(("scene", None, scene_prompt, scene_fn))
 
     results = await _stream_renders(websocket, session_id, style_guide, jobs)
 
@@ -225,6 +279,8 @@ async def generate_scene_visual(
     scene: Any,
     characters: list,
     world: Any,
+    img_model: str | None = None,
+    img_quality: str | None = None,
 ) -> None:
     """
     Continuation visual pass: Scene Director -> Scene Composer -> stream one image.
@@ -240,8 +296,9 @@ async def generate_scene_visual(
         style_guide, scene.scene_text, scene.location, characters, world
     )
 
+    scene_fn = partial(render_scene, model=img_model, quality=img_quality)
     results = await _stream_renders(
-        websocket, session_id, style_guide, [("scene", None, prompt, render_scene)]
+        websocket, session_id, style_guide, [("scene", None, prompt, scene_fn)]
     )
     scene.image_url = results.get(("scene", None))
 
@@ -284,7 +341,8 @@ def _placeholder_choice_applied(choice: str, session_id: str) -> dict[str, Any]:
 
 async def handle_start_story(
     websocket: WebSocket, payload: dict[str, Any], session_id: str
-) -> None:
+) -> Optional[dict[str, Any]]:
+    """Begin a story; returns the in-memory session for connection-scoped caching."""
     idea = payload.get("idea", "")
     if not isinstance(idea, str) or not idea.strip():
         await send_message(
@@ -292,7 +350,20 @@ async def handle_start_story(
             "error",
             {"message": "start_story requires a non-empty string 'idea' in payload."},
         )
-        return
+        return None
+
+    # Resolve the user's model choices (dropdowns) and lock them for the session.
+    text_preset = payload.get("text_preset")
+    image_preset = payload.get("image_preset")
+    set_request_model(resolve_text_model(text_preset))
+    img_model, img_quality = resolve_image_model(image_preset)
+
+    async def emit_progress(stage: str) -> None:
+        # Best-effort: drives the frontend "dreaming" loader with real milestones.
+        try:
+            await send_message(websocket, "progress", {"stage": stage})
+        except Exception:
+            pass
 
     state: NarrativeState = {
         "user_idea": idea.strip(),
@@ -306,10 +377,17 @@ async def handle_start_story(
         "storyteller_retry_count": 0,
     }
 
-    final_state = await run_narrative(state)
+    final_state = await run_narrative(state, on_progress=emit_progress)
+
+    # Story outline carries the model presets so continuation turns reuse them
+    # (persisted in the jsonb column — no schema change needed).
+    story_outline: dict = final_state.get("story_outline") or {}
+    story_outline["text_preset"] = text_preset if isinstance(text_preset, str) else DEFAULT_TEXT_PRESET
+    story_outline["image_preset"] = (
+        image_preset if isinstance(image_preset, str) else DEFAULT_IMAGE_PRESET
+    )
 
     # Serialize rich state objects for DB persistence
-    story_outline: dict = final_state.get("story_outline") or {}
     characters_dicts = [asdict(c) for c in final_state.get("characters") or []]
     world_dict = asdict(final_state["world"]) if final_state.get("world") else {}
 
@@ -359,6 +437,8 @@ async def handle_start_story(
     )
 
     # Visual layer: generate and stream images now that the text is on screen.
+    # Mutates story_outline (style guide) + character/world image_url in place, so
+    # the cached session below reflects the enriched state.
     await generate_initial_visuals(
         websocket,
         session_id,
@@ -366,12 +446,29 @@ async def handle_start_story(
         characters=final_state.get("characters") or [],
         world=final_state.get("world"),
         scene=final_state.get("current_scene"),
+        img_model=img_model,
+        img_quality=img_quality,
     )
+
+    # Connection-scoped session cache — mirrors get_session()'s shape so make_choice
+    # can skip the DB reload every turn. scene_history holds saved Scene objects.
+    return {
+        "user_idea": idea.strip(),
+        "scene_count": 0,
+        "story_outline": story_outline,
+        "characters": final_state.get("characters") or [],
+        "world": final_state.get("world"),
+        "scene_history": [final_state["current_scene"]] if final_state.get("current_scene") else [],
+    }
 
 
 async def handle_make_choice(
-    websocket: WebSocket, payload: dict[str, Any], session_id: str
-) -> None:
+    websocket: WebSocket,
+    payload: dict[str, Any],
+    session_id: str,
+    session: Optional[dict[str, Any]] = None,
+) -> Optional[dict[str, Any]]:
+    """Advance the story; returns the updated cached session."""
     choice = payload.get("choice", "")
     if not isinstance(choice, str) or not choice.strip():
         await send_message(
@@ -379,13 +476,19 @@ async def handle_make_choice(
             "error",
             {"message": "make_choice requires a non-empty string 'choice' in payload."},
         )
-        return
+        return session
 
-    # --- Load existing session from DB ---
-    session = await get_session(session_id)
+    # --- Use the connection-cached session; fall back to a DB load (e.g. reconnect) ---
+    if not session:
+        session = await get_session(session_id)
     if not session:
         await send_message(websocket, "error", {"message": "Session not found."})
-        return
+        return None
+
+    # Re-apply the session's locked model choices for this turn.
+    outline0 = session.get("story_outline") or {}
+    set_request_model(resolve_text_model(outline0.get("text_preset")))
+    img_model, img_quality = resolve_image_model(outline0.get("image_preset"))
 
     scene_count = session.get("scene_count", 0) + 1
     is_final = scene_count >= 3  # 3rd choice triggers the conclusive ending
@@ -413,10 +516,11 @@ async def handle_make_choice(
     # --- Run storyteller + judge only (no orchestrator / world / character setup) ---
     final_state = await run_continuation(state)
 
-    # --- Persist updated session state ---
+    # --- Persist updated session state (durable write path) ---
     updated_characters = [asdict(c) for c in final_state.get("characters") or []]
     updated_world = asdict(final_state["world"]) if final_state.get("world") else {}
-    updated_outline = final_state.get("story_outline") or {}
+    # Keep the model presets / style guide even if the graph didn't re-emit outline.
+    updated_outline = {**outline0, **(final_state.get("story_outline") or {})}
 
     await update_session_state(
         session_id,
@@ -436,6 +540,16 @@ async def handle_make_choice(
                 "status": final_state["current_scene"].status,
             },
         )
+
+    # --- Update the connection-cached session in place (mirrors the DB write) ---
+    session["scene_count"] = scene_count
+    session["story_outline"] = updated_outline
+    session["characters"] = final_state.get("characters") or session.get("characters") or []
+    session["world"] = final_state.get("world") or session.get("world")
+    if final_state.get("current_scene"):
+        session["scene_history"] = list(session.get("scene_history") or []) + [
+            final_state["current_scene"]
+        ]
 
     # --- Build response payload ---
     response: dict[str, Any] = {
@@ -464,7 +578,7 @@ async def handle_make_choice(
     await send_message(websocket, "choice_applied", response)
 
     # Visual layer: stream the scene illustration, reusing the saved style guide.
-    style_guide = (final_state.get("story_outline") or {}).get("visual_style_guide", "")
+    style_guide = updated_outline.get("visual_style_guide", "")
     await generate_scene_visual(
         websocket,
         session_id,
@@ -472,7 +586,11 @@ async def handle_make_choice(
         scene=final_state.get("current_scene"),
         characters=final_state.get("characters") or [],
         world=final_state.get("world"),
+        img_model=img_model,
+        img_quality=img_quality,
     )
+
+    return session
 
 
 # ---------------------------------------------------------------------------
@@ -493,6 +611,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     """
     await websocket.accept()
     session_id = str(uuid.uuid4())
+    # One story session per connection; cache it here so make_choice avoids a full
+    # DB reload every turn (saved into Supabase too as the durable path).
+    session: Optional[dict[str, Any]] = None
     logger.info("WebSocket connected, session_id=%s", session_id)
 
     await send_message(
@@ -546,9 +667,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 continue
 
             if message_type == "start_story":
-                await handle_start_story(websocket, payload, session_id)
+                session = await handle_start_story(websocket, payload, session_id)
             elif message_type == "make_choice":
-                await handle_make_choice(websocket, payload, session_id)
+                session = await handle_make_choice(websocket, payload, session_id, session)
             else:
                 await send_message(
                     websocket,

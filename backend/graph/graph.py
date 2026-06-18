@@ -10,7 +10,7 @@ Flow:
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Literal, Optional
 
 from langgraph.graph import END, START, StateGraph
 
@@ -240,12 +240,18 @@ narrative_graph = _build_narrative_graph()
 # ---------------------------------------------------------------------------
 
 
-async def run_narrative(state: NarrativeState) -> NarrativeState:
+async def run_narrative(
+    state: NarrativeState,
+    on_progress: Optional[Callable[[str], Awaitable[None]]] = None,
+) -> NarrativeState:
     """
     Run the full narrative pipeline from user idea through scene generation.
 
     Args:
         state: Initial narrative state (must include ``user_idea`` and ``session_id``).
+        on_progress: Optional async callback invoked with a milestone key
+            ("shaping" | "casting" | "building" | "writing") the first time each
+            becomes available, so callers can stream real progress to the UI.
 
     Returns:
         Final state after orchestration, world/character setup, storytelling, and judging.
@@ -253,8 +259,31 @@ async def run_narrative(state: NarrativeState) -> NarrativeState:
     if "storyteller_retry_count" not in state:
         state = {**state, "storyteller_retry_count": 0}
 
-    result = await narrative_graph.ainvoke(state)
-    return result
+    if on_progress is None:
+        return await narrative_graph.ainvoke(state)
+
+    # Stream full state values after each node so we can surface real milestones.
+    # The last yielded value is the final state (equivalent to ainvoke). Falls back
+    # to ainvoke if streaming yields nothing.
+    final: Optional[NarrativeState] = None
+    seen: set[str] = set()
+
+    async def fire(stage: str, ready: bool) -> None:
+        if ready and stage not in seen:
+            seen.add(stage)
+            try:
+                await on_progress(stage)
+            except Exception:  # progress is best-effort; never break the pipeline
+                pass
+
+    async for values in narrative_graph.astream(state, stream_mode="values"):
+        final = values
+        await fire("shaping", bool(values.get("story_outline")))
+        await fire("casting", bool(values.get("characters")))
+        await fire("building", values.get("world") is not None)
+        await fire("writing", values.get("current_scene") is not None)
+
+    return final if final is not None else await narrative_graph.ainvoke(state)
 
 
 async def run_continuation(state: NarrativeState) -> NarrativeState:

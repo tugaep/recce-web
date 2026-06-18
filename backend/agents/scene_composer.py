@@ -15,7 +15,9 @@ from llm.fal_image import generate_image
 logger = logging.getLogger(__name__)
 
 
-async def render_scene(prompt: str) -> str:
+async def render_scene(
+    prompt: str, model: str | None = None, quality: str | None = None
+) -> str:
     """Render a scene illustration and return its URL. Raises on failure."""
     logger.info("Scene Composer rendering scene frame")
-    return await generate_image(prompt)
+    return await generate_image(prompt, model=model, quality=quality)

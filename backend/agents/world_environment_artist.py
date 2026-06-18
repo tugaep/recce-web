@@ -14,7 +14,9 @@ from llm.fal_image import generate_image
 logger = logging.getLogger(__name__)
 
 
-async def render_environment(prompt: str) -> str:
+async def render_environment(
+    prompt: str, model: str | None = None, quality: str | None = None
+) -> str:
     """Render a world establishing shot and return its URL. Raises on failure."""
     logger.info("World & Environment Artist rendering establishing shot")
-    return await generate_image(prompt)
+    return await generate_image(prompt, model=model, quality=quality)

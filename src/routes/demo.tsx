@@ -47,10 +47,27 @@ type ChoiceTaken = { sceneTitle: string; choiceLabel: string };
 
 type SceneEntry = { scene: WsScene; choice: string | null };
 
+// Render-quality presets — keys match the backend allowlist (main.py). Honest
+// labels so the tradeoff (longer wait = richer output) is clear.
+const TEXT_PRESETS = [
+  { value: "fast", label: "Fast — quicker, lighter prose" },
+  { value: "balanced", label: "Balanced — recommended" },
+  { value: "capable", label: "Most capable — richest, slowest" },
+];
+const IMAGE_PRESETS = [
+  { value: "fast", label: "Lightning — seconds, simpler art" },
+  { value: "standard", label: "Standard — balanced (default)" },
+  { value: "rich", label: "Rich — more detail, slower" },
+  { value: "cinematic", label: "Cinematic — richest, ~2 min/image" },
+];
+
 function DemoPage() {
   const [stage, setStage] = useState<Stage>("idea");
   const [idea, setIdea] = useState("");
   const [history, setHistory] = useState<ChoiceTaken[]>([]);
+  const [textPreset, setTextPreset] = useState("balanced");
+  const [imagePreset, setImagePreset] = useState("standard");
+  const [progressStage, setProgressStage] = useState<string | null>(null);
 
   const { sendMessage, lastMessage } = useWebSocket();
 
@@ -98,6 +115,11 @@ function DemoPage() {
       setStage("play");
     }
 
+    if (msg.type === "progress") {
+      const p = msg.payload as { stage?: string };
+      if (p?.stage) setProgressStage(p.stage);
+    }
+
     if (msg.type === "image_ready") {
       const p = msg.payload as unknown as ImageReadyPayload;
       setVisuals((prev) => applyImageReady(prev, p));
@@ -115,7 +137,8 @@ function DemoPage() {
     const v = value.trim();
     if (!v) return;
     setIdea(v);
-    sendMessage("start_story", { idea: v });
+    setProgressStage(null);
+    sendMessage("start_story", { idea: v, text_preset: textPreset, image_preset: imagePreset });
     setStage("dreaming");
   }
 
@@ -139,6 +162,7 @@ function DemoPage() {
     setAllScenes([]);
     setVisuals(emptyVisualState);
     setErrorMsg("");
+    setProgressStage(null);
   }
 
   return (
@@ -202,11 +226,43 @@ function DemoPage() {
                   </button>
                 ))}
               </div>
+
+              {/* Render settings — longer wait = richer output */}
+              <div className="mx-auto mt-10 grid max-w-md gap-4 sm:grid-cols-2">
+                <label className="block text-left">
+                  <span className="eyebrow">Writing</span>
+                  <select
+                    value={textPreset}
+                    onChange={(e) => setTextPreset(e.target.value)}
+                    className="mt-2 w-full border-2 border-hairline bg-background px-3 py-2 text-xs text-foreground transition-colors focus:border-[color:var(--lavender)] focus:outline-none"
+                  >
+                    {TEXT_PRESETS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block text-left">
+                  <span className="eyebrow">Visuals</span>
+                  <select
+                    value={imagePreset}
+                    onChange={(e) => setImagePreset(e.target.value)}
+                    className="mt-2 w-full border-2 border-hairline bg-background px-3 py-2 text-xs text-foreground transition-colors focus:border-[color:var(--lavender)] focus:outline-none"
+                  >
+                    {IMAGE_PRESETS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
             </form>
           </section>
         )}
 
-        {stage === "dreaming" && <DreamingLoader idea={idea} />}
+        {stage === "dreaming" && <DreamingLoader idea={idea} stage={progressStage} />}
 
         {stage === "error" && (
           <section className="mx-auto mt-24 max-w-xl text-center animate-fade-up">
@@ -280,20 +336,40 @@ const DREAM_PHASES = [
   "Rolling camera",
 ];
 
-function DreamingLoader({ idea }: { idea: string }) {
-  const [phase, setPhase] = useState(0);
+// Backend progress milestones -> phase index in DREAM_PHASES.
+const STAGE_TO_PHASE: Record<string, number> = {
+  shaping: 1, // Shaping the story
+  casting: 2, // Casting the characters
+  building: 3, // Building the world
+  writing: 4, // Writing the opening scene
+};
 
+function DreamingLoader({ idea, stage }: { idea: string; stage: string | null }) {
+  const [timerPhase, setTimerPhase] = useState(0);
+  const [realPhase, setRealPhase] = useState<number | null>(null);
+
+  // Real backend milestones drive the phase once they start arriving.
   useEffect(() => {
+    if (!stage) return;
+    const target = STAGE_TO_PHASE[stage];
+    if (target != null) setRealPhase((p) => Math.max(p ?? 0, target));
+  }, [stage]);
+
+  // Gentle fallback: only runs until the first real event, and is capped before
+  // the final two phases so it never claims more progress than has happened.
+  useEffect(() => {
+    if (realPhase != null) return;
     const reduced =
       typeof window !== "undefined" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     if (reduced) return;
     const id = window.setInterval(() => {
-      // Advance through phases, then hold on the last ("Rolling camera").
-      setPhase((p) => Math.min(p + 1, DREAM_PHASES.length - 1));
+      setTimerPhase((p) => Math.min(p + 1, 4));
     }, 3200);
     return () => window.clearInterval(id);
-  }, []);
+  }, [realPhase]);
+
+  const phase = realPhase ?? timerPhase;
 
   return (
     <section className="mx-auto mt-20 max-w-xl text-center">

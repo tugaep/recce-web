@@ -54,6 +54,7 @@ function Index() {
           src={heroAura}
           alt=""
           aria-hidden
+          fetchPriority="high"
           className="pointer-events-none absolute inset-0 h-full w-full object-cover"
           width={1920}
           height={1280}
