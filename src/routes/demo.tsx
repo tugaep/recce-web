@@ -496,7 +496,9 @@ function DemoPage() {
 
       <div className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-[60vh] bg-aura" />
 
-      <main className="mx-auto max-w-5xl px-6 pb-24 pt-32">
+      <main
+        className={`mx-auto px-6 pb-24 pt-32 ${stage === "play" ? "max-w-[1600px]" : "max-w-5xl"}`}
+      >
         {stage === "idea" && (
           <section className="animate-fade-up">
             <div className="text-center">
@@ -986,32 +988,33 @@ function ScenePlayer({
         </button>
       </div>
 
-      {/* image — scene illustration streams in from the Scene Composer */}
-      <figure className="mt-6 overflow-hidden border-2 border-hairline">
-        <StoryImage
-          url={visuals.scene}
-          failed={Boolean(visuals.failed["scene"])}
-          fallback={mockScenes["start"].image}
-          alt={currentScene?.location ?? "Scene"}
-          aspectClass="aspect-[16/9]"
-          label="Composing the scene"
-          width={1600}
-          height={900}
-        />
-      </figure>
+      {/* scene + context side-by-side */}
+      <div className="mt-6 grid gap-8 md:grid-cols-2 md:items-center">
+        <figure className="overflow-hidden border-2 border-hairline">
+          <StoryImage
+            url={visuals.scene}
+            failed={Boolean(visuals.failed["scene"])}
+            fallback={mockScenes["start"].image}
+            alt={currentScene?.location ?? "Scene"}
+            aspectClass="aspect-[16/9]"
+            label="Composing the scene"
+            width={1600}
+            height={900}
+          />
+        </figure>
 
-      {/* narrative */}
-      <div className="mt-10 max-w-3xl">
-        <p className="eyebrow">
-          {isFinal
-            ? "Epilogue"
-            : (CHAPTER_LABELS[history.length] ?? `Chapter ${history.length + 1}`)}
-        </p>
-        <h2 className="mt-3 font-display text-3xl font-light leading-tight text-foreground sm:text-4xl">
-          {currentScene?.location ?? (isFinal ? "The End" : "The Story Continues")}
-        </h2>
-        <div className="mt-6">
-          <StreamingText text={currentScene?.scene_text ?? ""} animate={!sceneStreamed} />
+        <div>
+          <p className="eyebrow">
+            {isFinal
+              ? "Epilogue"
+              : (CHAPTER_LABELS[history.length] ?? `Chapter ${history.length + 1}`)}
+          </p>
+          <h2 className="mt-3 font-display text-3xl font-light leading-tight text-foreground sm:text-4xl lg:text-5xl">
+            {currentScene?.location ?? (isFinal ? "The End" : "The Story Continues")}
+          </h2>
+          <div className="mt-6">
+            <StreamingText text={currentScene?.scene_text ?? ""} animate={!sceneStreamed} />
+          </div>
         </div>
       </div>
 
