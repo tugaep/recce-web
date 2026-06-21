@@ -1,21 +1,17 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  SparklesIcon,
   UserGroupIcon,
   Globe02Icon,
   GitBranchIcon,
   ArrowRight01Icon,
 } from "@hugeicons/core-free-icons";
-import heroAura from "@/assets/hero-aura.jpg";
 import { Nav } from "@/components/site/Nav";
 import { Footer } from "@/components/site/Footer";
 import { EyebrowLabel } from "@/components/site/EyebrowLabel";
+import FloatingLines from "@/components/ui/FloatingLines";
 
-// Cinema icon shims (lucide → Hugeicons) — defined before the data arrays below.
-// ponytail: thin aliases to swap the icon library with a minimal diff.
 type IconProps = { className?: string };
-const Sparkles = (p: IconProps) => <HugeiconsIcon icon={SparklesIcon} {...p} />;
 const Users = (p: IconProps) => <HugeiconsIcon icon={UserGroupIcon} {...p} />;
 const Globe2 = (p: IconProps) => <HugeiconsIcon icon={Globe02Icon} {...p} />;
 const GitBranch = (p: IconProps) => <HugeiconsIcon icon={GitBranchIcon} {...p} />;
@@ -25,38 +21,41 @@ export const Route = createFileRoute("/")({
   component: Index,
 });
 
+// recce brand palette — lavender → soft → blush, looped, drives the hero waves.
+const BRAND_LINES = ["#8B5FE5", "#A77FE8", "#C9B8E8", "#F1B4C9", "#8B5FE5"];
+
 const pillars = [
   {
     icon: Users,
     title: "Characters",
-    body: "A cast generated with names, backstories, and the small contradictions that make people feel real.",
+    body: "Principal cast briefed the way a casting director would. Backstory, motivation, the line they wouldn't say.",
   },
   {
     icon: Globe2,
     title: "Worlds",
-    body: "Era, atmosphere, the rules of the place. Designed to be inhabited, not merely described.",
+    body: "Production design before the set exists. Period and place, drawn from the script up.",
   },
   {
     icon: GitBranch,
     title: "Choices",
-    body: "A branching narrative that responds to you. Every decision moves the story to a different country.",
+    body: "A branching screenplay. Pick a choice and the next scene rewrites around it.",
   },
 ];
 
 const steps = [
-  { n: "01", title: "Bring an idea", body: "A line is enough. A premise, a feeling, a single image." },
-  { n: "02", title: "Meet the cast", body: "A specialist agent designs characters with depth and intent." },
-  { n: "03", title: "Step into the world", body: "Locations, era, and atmosphere render around you." },
-  { n: "04", title: "Play the story", body: "Read, decide, and watch the narrative reshape itself." },
+  { n: "01", title: "Bring a logline", body: "A sentence works, or a single image." },
+  { n: "02", title: "Read the sides", body: "The character designer drafts a principal cast you can read the way a casting director reads sides." },
+  { n: "03", title: "Scout the world", body: "The world builder fills in period and place with production-design notes." },
+  { n: "04", title: "Roll the scene", body: "Read, decide, and the next beat is written around your choice." },
 ];
 
 const agents = [
-  { name: "Orchestrator", role: "Routes the story, holds the state." },
-  { name: "Character Designer", role: "Names, backstories, identity." },
-  { name: "World Builder", role: "Era, atmosphere, rules of the place." },
-  { name: "Visual Designer", role: "Translates words into cinematic frames." },
-  { name: "Storyteller", role: "Writes the scene and offers the choices." },
-  { name: "Judge", role: "Quietly guards continuity and tone." },
+  { name: "Orchestrator", role: "Runs the production. Tracks where the story is and what comes next." },
+  { name: "Character Designer", role: "Drafts the principal cast with backstory and motivation." },
+  { name: "World Builder", role: "Production design. Period, place, and the look the script asks for." },
+  { name: "Visual Designer", role: "Cinematography. Turns the script into shots." },
+  { name: "Storyteller", role: "The writer in the room. Drafts the scene and the choices that follow." },
+  { name: "Judge", role: "Script supervisor. Keeps continuity and tone." },
 ];
 
 function Index() {
@@ -64,168 +63,224 @@ function Index() {
     <div className="min-h-screen bg-background text-foreground">
       <Nav />
 
-      {/* HERO */}
-      <section className="relative isolate overflow-hidden">
-        <img
-          src={heroAura}
-          alt=""
-          aria-hidden
-          fetchPriority="high"
-          className="pointer-events-none absolute inset-0 h-full w-full object-cover"
-          width={1920}
-          height={1280}
-        />
-        <div className="pointer-events-none absolute inset-0 bg-mist" />
-        <div className="pointer-events-none absolute inset-0 bg-aura" />
-        <div className="pointer-events-none absolute inset-0 grain" />
+      {/* HERO — dark stage so FloatingLines' screen blend reveals the brand palette */}
+      <section className="dark relative isolate overflow-hidden bg-[color:var(--background)] text-[color:var(--foreground)]">
+        <div className="absolute inset-0 z-0">
+          <FloatingLines
+            linesGradient={BRAND_LINES}
+            mixBlendMode="screen"
+            animationSpeed={0.6}
+            interactive={true}
+            bendRadius={5}
+            bendStrength={-0.35}
+            parallax={true}
+            parallaxStrength={0.12}
+          />
+        </div>
+        <div className="pointer-events-none absolute inset-0 z-[1] bg-[radial-gradient(60%_50%_at_50%_30%,transparent_0%,oklch(0.18_0.03_285/0.6)_100%)]" />
+        <div className="pointer-events-none absolute inset-0 z-[1] grain opacity-40" />
 
-        <div className="relative mx-auto flex min-h-[92vh] max-w-6xl flex-col items-center justify-center px-6 pb-24 pt-40 text-center">
-          <div className="animate-fade-up">
-            <EyebrowLabel>AI Interactive Storytelling Studio</EyebrowLabel>
+        <div className="relative z-10 mx-auto flex min-h-screen max-w-7xl flex-col px-8 pb-24 pt-32 md:px-12">
+          <div className="mt-auto max-w-5xl">
+            <div className="animate-fade-up [animation-delay:120ms]">
+              <EyebrowLabel>AI Interactive Storytelling</EyebrowLabel>
+            </div>
+
+            <h1 className="mt-10 font-display text-[clamp(3rem,9vw,9.5rem)] font-light leading-[0.95] tracking-[-0.03em] text-[color:var(--foreground)] animate-fade-up [animation-delay:240ms]">
+              Where imagination
+              <br />
+              <em className="not-italic text-[color:var(--lavender)]">becomes</em>{" "}
+              experience.
+            </h1>
+
+            <div className="mt-14 flex justify-end animate-fade-up [animation-delay:420ms]">
+              <div className="flex items-center gap-6">
+                <Link
+                  to="/demo"
+                  className="group inline-flex items-center gap-3 border border-[color:var(--foreground)] bg-[color:var(--foreground)] px-7 py-4 text-sm font-medium tracking-wide text-[color:var(--background)] transition-all duration-500 ease-luxe hover:bg-transparent hover:text-[color:var(--foreground)]"
+                >
+                  Begin a story
+                  <ArrowRight className="h-4 w-4 transition-transform duration-500 ease-luxe group-hover:translate-x-1" />
+                </Link>
+                <a
+                  href="#how"
+                  className="hidden text-sm tracking-wide text-[color:var(--foreground)] underline-offset-8 transition-opacity duration-300 hover:opacity-60 sm:inline"
+                >
+                  How it works
+                </a>
+              </div>
+            </div>
           </div>
-          <h1 className="mt-6 max-w-4xl text-balance font-display text-5xl font-light leading-[1.05] tracking-tight text-foreground sm:text-6xl md:text-7xl animate-fade-up [animation-delay:120ms]">
-            Where imagination
-            <br />
-            <em className="not-italic text-[color:var(--lavender)]">
-              becomes experience
-            </em>
-            .
-          </h1>
-          <p className="mt-7 max-w-xl text-balance text-base leading-relaxed text-muted-foreground animate-fade-up [animation-delay:240ms]">
-            Bring a single idea. Recce assembles a cast, a world, and a
-            choice-driven story you step inside — like a film you can play.
-          </p>
+        </div>
+      </section>
 
-          <div className="mt-10 flex flex-wrap items-center justify-center gap-3 animate-fade-up [animation-delay:360ms]">
-            <Link
-              to="/demo"
-              className="group inline-flex items-center gap-2 bg-foreground px-6 py-3 text-sm font-medium text-background transition-all duration-500 ease-luxe"
-            >
-              Begin a story
-              <ArrowRight className="h-4 w-4 transition-transform duration-500 ease-luxe group-hover:translate-x-1" />
-            </Link>
-            <a
-              href="#how"
-              className="inline-flex items-center gap-2 border-2 border-hairline bg-surface px-6 py-3 text-sm text-foreground transition-colors hover:border-[color:var(--lavender)]"
-            >
-              How it works
-            </a>
-          </div>
-
-          <div className="mt-16 flex items-center gap-2 text-xs text-muted-foreground animate-fade-in [animation-delay:600ms]">
-            <Sparkles className="h-3.5 w-3.5 text-[color:var(--lavender)]" />
-            A live AI playthrough — no account needed.
+      {/* MANIFESTO — quiet transition */}
+      <section className="relative border-t border-hairline bg-background">
+        <div className="mx-auto max-w-7xl px-8 py-32 md:px-12">
+          <div className="grid gap-16 md:grid-cols-12">
+            <div className="md:col-span-3">
+              <span className="text-xs uppercase tracking-[0.22em] text-muted-foreground">
+                I. Premise
+              </span>
+            </div>
+            <p className="md:col-span-9 font-display text-[clamp(1.75rem,3.2vw,3rem)] font-light leading-[1.15] tracking-[-0.015em] text-foreground">
+              A recce is the location scout a director runs before principal
+              photography. We borrowed the{" "}
+              <em className="not-italic text-[color:var(--lavender)]">term</em>.
+              Bring a logline. A studio of agents handles casting, world, and script
+              alongside you.
+            </p>
           </div>
         </div>
       </section>
 
       {/* PILLARS */}
-      <section className="relative border-t-2 border-hairline bg-background">
-        <div className="mx-auto grid max-w-6xl gap-3 px-6 sm:grid-cols-3">
-          {pillars.map((p) => (
-            <article
-              key={p.title}
-              className="group border-2 border-foreground bg-background p-10 transition-colors duration-500 ease-luxe hover:bg-surface"
-            >
-              <div className="flex h-10 w-10 items-center justify-center border-2 border-hairline text-[color:var(--lavender)] transition-colors group-hover:border-[color:var(--lavender)]">
-                <p.icon className="h-4 w-4" />
-              </div>
-              <h3 className="mt-6 font-display text-2xl font-light text-foreground">
-                {p.title}
-              </h3>
-              <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-                {p.body}
-              </p>
-            </article>
-          ))}
+      <section className="relative border-t border-hairline bg-background">
+        <div className="mx-auto max-w-7xl px-8 py-32 md:px-12">
+          <div className="grid gap-16 md:grid-cols-12">
+            <div className="md:col-span-3">
+              <span className="text-xs uppercase tracking-[0.22em] text-muted-foreground">
+                II. Departments
+              </span>
+              <h2 className="mt-8 font-display text-4xl font-light leading-[1.05] tracking-[-0.02em] text-foreground sm:text-5xl">
+                Three departments,
+                <br />
+                one production.
+              </h2>
+            </div>
+
+            <div className="md:col-span-9 grid gap-px bg-hairline sm:grid-cols-3">
+              {pillars.map((p, i) => (
+                <article
+                  key={p.title}
+                  className="group relative bg-background p-10 transition-colors duration-700 ease-luxe hover:bg-surface"
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex h-11 w-11 items-center justify-center border border-hairline text-[color:var(--lavender)] transition-colors duration-500 group-hover:border-[color:var(--lavender)]">
+                      <p.icon className="h-4 w-4" />
+                    </div>
+                    <span className="text-xs tracking-[0.22em] text-muted-foreground">
+                      0{i + 1}
+                    </span>
+                  </div>
+                  <h3 className="mt-12 font-display text-2xl font-light tracking-[-0.01em] text-foreground">
+                    {p.title}
+                  </h3>
+                  <p className="mt-4 text-sm leading-relaxed text-muted-foreground">
+                    {p.body}
+                  </p>
+                </article>
+              ))}
+            </div>
+          </div>
         </div>
       </section>
 
       {/* HOW IT WORKS */}
-      <section id="how" className="relative border-t-2 border-hairline">
-        <div className="mx-auto max-w-6xl px-6 py-28">
-          <div className="max-w-2xl">
-            <EyebrowLabel>How it works</EyebrowLabel>
-            <h2 className="mt-5 font-display text-4xl font-light leading-tight text-foreground sm:text-5xl">
-              From an idea, in four quiet movements.
-            </h2>
-          </div>
+      <section id="how" className="relative border-t border-hairline bg-surface">
+        <div className="mx-auto max-w-7xl px-8 py-32 md:px-12">
+          <div className="grid gap-16 md:grid-cols-12">
+            <div className="md:col-span-4">
+              <span className="text-xs uppercase tracking-[0.22em] text-muted-foreground">
+                III. Workflow
+              </span>
+              <h2 className="mt-8 font-display text-4xl font-light leading-[1.05] tracking-[-0.02em] text-foreground sm:text-5xl md:text-6xl">
+                From logline
+                <br />
+                to playable
+                <br />
+                <em className="not-italic text-[color:var(--lavender)]">scene</em>.
+              </h2>
+            </div>
 
-          <ol className="mt-16 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {steps.map((s) => (
-              <li
-                key={s.n}
-                className="border-2 border-foreground bg-background p-8 transition-colors duration-500 ease-luxe hover:bg-surface"
-              >
-                <div className="font-display text-sm tracking-widest text-[color:var(--lavender)]">
-                  {s.n}
-                </div>
-                <h3 className="mt-3 font-display text-xl font-normal text-foreground">
-                  {s.title}
-                </h3>
-                <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-                  {s.body}
-                </p>
-              </li>
-            ))}
-          </ol>
+            <ol className="md:col-span-8 divide-y divide-hairline border-y border-hairline">
+              {steps.map((s) => (
+                <li
+                  key={s.n}
+                  className="group grid grid-cols-[auto_1fr] items-baseline gap-8 py-10 transition-colors duration-500 ease-luxe md:grid-cols-[6rem_1fr_2fr]"
+                >
+                  <span className="font-display text-sm tracking-[0.22em] text-[color:var(--lavender)]">
+                    {s.n}
+                  </span>
+                  <h3 className="font-display text-2xl font-light tracking-[-0.01em] text-foreground sm:text-3xl">
+                    {s.title}
+                  </h3>
+                  <p className="col-span-2 text-sm leading-relaxed text-muted-foreground md:col-span-1">
+                    {s.body}
+                  </p>
+                </li>
+              ))}
+            </ol>
+          </div>
         </div>
       </section>
 
       {/* AGENT ENSEMBLE */}
-      <section className="relative border-t-2 border-hairline bg-surface">
-        <div className="mx-auto max-w-6xl px-6 py-28">
-          <div className="flex flex-col items-start justify-between gap-6 sm:flex-row sm:items-end">
-            <div className="max-w-2xl">
-              <EyebrowLabel>The Ensemble</EyebrowLabel>
-              <h2 className="mt-5 font-display text-4xl font-light leading-tight text-foreground sm:text-5xl">
-                A small studio of specialist minds.
+      <section className="relative border-t border-hairline bg-background">
+        <div className="mx-auto max-w-7xl px-8 py-32 md:px-12">
+          <div className="grid gap-16 md:grid-cols-12">
+            <div className="md:col-span-5">
+              <span className="text-xs uppercase tracking-[0.22em] text-muted-foreground">
+                IV. Crew
+              </span>
+              <h2 className="mt-8 font-display text-4xl font-light leading-[1.05] tracking-[-0.02em] text-foreground sm:text-5xl md:text-6xl">
+                A studio,
+                <br />
+                by <em className="not-italic text-[color:var(--lavender)]">department</em>.
               </h2>
-              <p className="mt-4 max-w-xl text-sm leading-relaxed text-muted-foreground">
-                Recce is not one model trying to do everything. It is a quiet
-                ensemble — each agent with one craft, working together in a
-                shared narrative state.
+              <p className="mt-8 max-w-md text-sm leading-relaxed text-muted-foreground">
+                Recce isn't one model doing every job. It's a crew of agents, each
+                running one department off the same script.
               </p>
             </div>
-          </div>
 
-          <div className="mt-14 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {agents.map((a) => (
-              <div
-                key={a.name}
-                className="group border-2 border-hairline bg-background p-6 transition-all duration-500 ease-luxe hover:border-[color:var(--lavender)]"
-              >
-                <div className="flex items-center gap-3">
-                  <span className="inline-block h-1.5 w-1.5 bg-lavender-gradient" />
-                  <span className="eyebrow">Agent</span>
+            <div className="md:col-span-7 grid gap-px bg-hairline sm:grid-cols-2">
+              {agents.map((a, i) => (
+                <div
+                  key={a.name}
+                  className="group relative bg-background p-8 transition-colors duration-700 ease-luxe hover:bg-surface"
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <span className="inline-block h-1.5 w-1.5 bg-lavender-gradient" />
+                      <span className="text-xs uppercase tracking-[0.22em] text-muted-foreground">
+                        Agent. 0{i + 1}
+                      </span>
+                    </div>
+                  </div>
+                  <h3 className="mt-8 font-display text-2xl font-light tracking-[-0.01em] text-foreground">
+                    {a.name}
+                  </h3>
+                  <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+                    {a.role}
+                  </p>
                 </div>
-                <h3 className="mt-3 font-display text-xl font-normal text-foreground">
-                  {a.name}
-                </h3>
-                <p className="mt-1 text-sm text-muted-foreground">{a.role}</p>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
         </div>
       </section>
 
       {/* CLOSING CTA */}
-      <section className="relative border-t-2 border-hairline">
-        <div className="mx-auto flex max-w-6xl flex-col items-center gap-8 px-6 py-28 text-center">
-          <EyebrowLabel>Your turn</EyebrowLabel>
-          <h2 className="max-w-3xl font-display text-4xl font-light leading-tight text-foreground sm:text-6xl">
-            Step into your first scene.
+      <section className="relative border-t border-hairline bg-background">
+        <div className="mx-auto max-w-7xl px-8 py-40 text-center md:px-12">
+          <span className="text-xs uppercase tracking-[0.22em] text-muted-foreground">
+            V. Action
+          </span>
+          <h2 className="mx-auto mt-10 max-w-5xl font-display text-[clamp(2.5rem,7vw,7rem)] font-light leading-[0.98] tracking-[-0.03em] text-foreground">
+            A logline
+            <br />
+            <em className="not-italic text-[color:var(--lavender)]">is enough</em>.
           </h2>
-          <p className="max-w-lg text-sm leading-relaxed text-muted-foreground">
-            A short, live playthrough. Three scenes. Three choices each. Yours.
-          </p>
-          <Link
-            to="/demo"
-            className="group inline-flex items-center gap-2 bg-foreground px-7 py-3.5 text-sm font-medium text-background transition-all duration-500 ease-luxe"
-          >
-            Enter the demo
-            <ArrowRight className="h-4 w-4 transition-transform duration-500 ease-luxe group-hover:translate-x-1" />
-          </Link>
+          <div className="mt-16">
+            <Link
+              to="/demo"
+              className="group inline-flex items-center gap-3 border border-foreground bg-foreground px-8 py-4 text-sm font-medium tracking-wide text-background transition-all duration-500 ease-luxe hover:bg-transparent hover:text-foreground"
+            >
+              Start a recce
+              <ArrowRight className="h-4 w-4 transition-transform duration-500 ease-luxe group-hover:translate-x-1" />
+            </Link>
+          </div>
         </div>
       </section>
 
