@@ -5,6 +5,7 @@ import {
   Linkedin01Icon,
   GithubIcon,
   Mail01Icon,
+  Globe02Icon,
 } from "@hugeicons/core-free-icons";
 import { Nav } from "@/components/site/Nav";
 import { Footer } from "@/components/site/Footer";
@@ -31,7 +32,7 @@ const ArrowRight = (p: IconProps) => (
 
 
 type SocialLink = {
-  type: "linkedin" | "github" | "mail";
+  type: "linkedin" | "github" | "mail" | "website";
   href: string;
   label: string;
 };
@@ -54,6 +55,7 @@ const team = [
     socials: [
       { type: "linkedin" as const, href: "https://www.linkedin.com/in/tugrapefedikpinar/", label: "LinkedIn" },
       { type: "github" as const, href: "https://github.com/tugaep", label: "GitHub" },
+      { type: "website" as const, href: "https://tugrap.dev", label: "Portfolio" },
       { type: "mail" as const, href: "mailto:tugaep@gmail.com", label: "Email" },
     ] satisfies SocialLink[],
   },
@@ -63,6 +65,7 @@ const socialIcons = {
   linkedin: Linkedin01Icon,
   github: GithubIcon,
   mail: Mail01Icon,
+  website: Globe02Icon,
 } as const;
 
 
