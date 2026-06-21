@@ -8,7 +8,7 @@
 
 **An AI-powered interactive storytelling studio.** Bring a single movie idea and Recce builds the whole world around it — a cast with backstories, a designed world, generated visuals, and a choice-driven, playable narrative.
 
-[Repository](https://github.com/tugaep/recce-web) · [Demo walkthrough](#-the-demo-scenario) · [Run it locally](#-running-it-locally) · [Get a fal API key](#-getting-your-own-fal-credentials)
+[Repository](https://github.com/tugaep/recce-web) · [Blog post](https://medium.com/@ranakara2002/where-imagination-becomes-experience-recce-6e4f316c674a) · [Demo walkthrough](#-the-demo-scenario) · [Run it locally](#-running-it-locally) · [Get a fal API key](#-getting-your-own-fal-credentials)
 
 </div>
 
