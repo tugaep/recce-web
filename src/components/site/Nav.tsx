@@ -16,7 +16,15 @@ export function Nav() {
           <HugeiconsIcon icon={Home01Icon} className="h-4 w-4" />
         </Link>
 
-        <AmbientToggle />
+        <nav className="flex items-center gap-6">
+          <Link
+            to="/about"
+            className="text-xs uppercase tracking-[0.22em] text-muted-foreground transition-colors hover:text-foreground"
+          >
+            About us
+          </Link>
+          <AmbientToggle />
+        </nav>
       </div>
     </header>
   );
