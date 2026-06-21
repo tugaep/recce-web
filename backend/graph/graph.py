@@ -4,8 +4,11 @@ LangGraph workflow for the interactive storytelling pipeline.
 Flow:
   START -> orchestrator
        -> character_designer ─┐
-       -> world_builder      ├─> merge_node -> storyteller -> judge -> END
+       -> world_builder      ├─> merge_node -> storyteller -> gate -> END
        (parallel)            ┘                              └-> prepare_retry -> storyteller
+
+The ``gate`` is a structural-only check (no LLM). Quality is judged AFTER the
+scene is shown, by agents.judge.review_for_next_scene, and fed forward.
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ from typing import Any, Awaitable, Callable, Literal, Optional
 from langgraph.graph import END, START, StateGraph
 
 from agents.character_designer import run_character_designer
-from agents.judge import run_judge
+from agents.judge import run_gate
 from agents.orchestrator import run_orchestrator
 from agents.storyteller import run_storyteller
 from agents.world_builder import run_world_builder
@@ -120,9 +123,14 @@ async def merge_node(state: NarrativeState) -> dict:
     return out
 
 
-async def storyteller_node(state: NarrativeState) -> dict:
+async def storyteller_node(
+    state: NarrativeState,
+    on_delta: Optional[Callable[[str], Awaitable[None]]] = None,
+) -> dict:
     """
     Run the storyteller and return explicit scene fields (plus preserved context).
+
+    ``on_delta`` (when provided) streams the scene prose as it is generated.
     """
     state_dict = dict(state)
     _debug_keys("storyteller", "incoming state", state_dict)
@@ -130,7 +138,7 @@ async def storyteller_node(state: NarrativeState) -> dict:
     world = state.get("world")
     print(f"[DEBUG storyteller] state['world'] exists before agent: {world is not None}")
 
-    result = await run_storyteller(state)
+    result = await run_storyteller(state, on_delta)
 
     out: dict[str, Any] = {
         "current_scene": result.get("current_scene"),
@@ -163,11 +171,13 @@ async def storyteller_node(state: NarrativeState) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def route_after_judge(state: NarrativeState) -> Literal["end", "retry"]:
+def route_after_gate(state: NarrativeState) -> Literal["end", "retry"]:
     """
-    After the judge: finish if valid, or retry storyteller once if not.
+    After the structural gate: finish if valid, or retry the storyteller once if a
+    hard structural error slipped through (empty scene, wrong choice count).
 
-    Uses ``storyteller_retry_count`` to allow a single regeneration pass.
+    Quality is NOT judged here — it runs forward, after the scene is shown.
+    ``storyteller_retry_count`` allows a single regeneration pass.
     """
     if state.get("is_valid"):
         return "end"
@@ -200,7 +210,7 @@ def _build_narrative_graph():
     workflow.add_node("world_builder", world_builder_node)
     workflow.add_node("merge_node", merge_node)
     workflow.add_node("storyteller", storyteller_node)
-    workflow.add_node("judge", run_judge)
+    workflow.add_node("gate", run_gate)
     workflow.add_node("prepare_retry", prepare_retry)
 
     # Entry: begin with story outline from the user's idea
@@ -217,11 +227,11 @@ def _build_narrative_graph():
     )
     workflow.add_edge("merge_node", "storyteller")
 
-    workflow.add_edge("storyteller", "judge")
+    workflow.add_edge("storyteller", "gate")
 
     workflow.add_conditional_edges(
-        "judge",
-        route_after_judge,
+        "gate",
+        route_after_gate,
         {
             "end": END,
             "retry": "prepare_retry",
@@ -287,7 +297,10 @@ async def run_narrative(
     return final if final is not None else await narrative_graph.ainvoke(state)
 
 
-async def run_continuation(state: NarrativeState) -> NarrativeState:
+async def run_continuation(
+    state: NarrativeState,
+    on_delta: Optional[Callable[[str], Awaitable[None]]] = None,
+) -> NarrativeState:
     """
     Continue an existing story session with a new scene — skips the setup pipeline.
 
@@ -295,15 +308,14 @@ async def run_continuation(state: NarrativeState) -> NarrativeState:
     character_designer, world_builder and merge_node are **not** called because
     world/character context is already established in the incoming state.
 
-    Two-phase judge logic mirrors judge.py:
-      Phase 1a – _structural_preflight: hard errors → immediate rejection.
-      Phase 1b – _compute_risk_flags:  soft quality checks → risk_flags list.
-                 Empty flags → scene accepted without LLM.
-      Phase 2  – LLM judge (run_judge): called only when risk_flags non-empty.
+    Validation is structural-only here (the gate, no LLM): a missing scene, wrong
+    choice count, or empty fields fail and trigger a single storyteller retry.
+    Soft quality is NOT judged on the critical path — agents.judge.review_for_next_scene
+    runs after the scene is shown and feeds guidance forward into the next turn.
 
     Retry logic:
-      - If phase 1a or 2 marks the scene invalid and storyteller_retry_count < 1,
-        the storyteller is called once more with an incremented counter.
+      - If the structural gate fails and storyteller_retry_count < 1, the
+        storyteller is called once more with an incremented counter.
       - A second failure is accepted as-is and returned to the caller.
 
     Args:
@@ -313,7 +325,7 @@ async def run_continuation(state: NarrativeState) -> NarrativeState:
     Returns:
         Final state after storytelling and judging (with possible single retry).
     """
-    from agents.judge import _structural_preflight, _compute_risk_flags
+    from agents.judge import _structural_preflight
 
     # Ensure retry counter is present
     if "storyteller_retry_count" not in state:
@@ -326,62 +338,39 @@ async def run_continuation(state: NarrativeState) -> NarrativeState:
         f"retry_count={state.get('storyteller_retry_count')}, is_final={is_final}"
     )
 
-    async def _run_once(current_state: NarrativeState) -> tuple[NarrativeState, bool, str | None, list[str]]:
+    async def _run_once(
+        current_state: NarrativeState,
+        stream_delta: Optional[Callable[[str], Awaitable[None]]],
+    ) -> tuple[NarrativeState, bool, str | None]:
         """
-        Run storyteller + local phase-1 checks.
+        Run storyteller + the structural gate (local, no LLM).
 
-        Returns (new_state, is_valid, preflight_error, risk_flags).
+        Returns (new_state, is_valid, preflight_error). Quality is handled forward
+        by review_for_next_scene after the scene is shown — never blocking here.
         """
-        storyteller_delta = await storyteller_node(current_state)
+        storyteller_delta = await storyteller_node(current_state, stream_delta)
         new_state = {**current_state, **storyteller_delta}
 
-        # Phase 1a: structural preflight
         preflight_error = _structural_preflight(
             new_state.get("current_scene"), new_state.get("choices") or [], is_final
         )
         if preflight_error:
-            print(f"[DEBUG run_continuation] preflight failed: {preflight_error!r}")
-            return new_state, False, preflight_error, []
+            print(f"[DEBUG run_continuation] gate failed (structural): {preflight_error!r}")
+            return new_state, False, preflight_error
 
-        # Final scene: preflight passed → accept immediately (no LLM)
-        if is_final:
-            print("[DEBUG run_continuation] final scene — preflight passed, accepted.")
-            return new_state, True, None, []
+        return new_state, True, None
 
-        # Phase 1b: risk flags (soft quality checks, no LLM)
-        scene = new_state.get("current_scene")
-        choices = new_state.get("choices") or []
-        risk_flags = _compute_risk_flags(scene, choices)  # type: ignore[arg-type]
+    # --- First storyteller pass (streams prose to the client if on_delta given) ---
+    state, is_valid, preflight_error = await _run_once(state, on_delta)
 
-        print(
-            f"[DEBUG run_continuation] risk_flags={risk_flags}, "
-            f"retry_count={new_state.get('storyteller_retry_count')}"
-        )
-        return new_state, len(risk_flags) == 0, None, risk_flags
-
-    # --- First storyteller pass ---
-    state, is_valid, preflight_error, risk_flags = await _run_once(state)
-
-    # --- Single retry if local checks failed and no retries used yet ---
+    # --- Single retry only on hard structural failure (no re-streaming) ---
     if not is_valid and state.get("storyteller_retry_count", 0) < 1:
-        print("[DEBUG run_continuation] local check failed — retrying storyteller once")
+        print("[DEBUG run_continuation] structural gate failed — retrying storyteller once")
         state = {**state, "storyteller_retry_count": state.get("storyteller_retry_count", 0) + 1}
-        state, is_valid, preflight_error, risk_flags = await _run_once(state)
+        state, is_valid, preflight_error = await _run_once(state, None)
         print(f"[DEBUG run_continuation] after retry — is_valid={is_valid}")
 
-    # --- Phase 2: LLM judge only if risk flags remain after retry ---
-    if is_valid is False and preflight_error is not None:
-        # Hard structural error — reject without LLM
-        return {**state, "is_valid": False, "error_message": preflight_error, "risk_flags": []}
-
-    if risk_flags:
-        # Soft quality issue — escalate to LLM judge
-        print(f"[DEBUG run_continuation] escalating to LLM judge — flags={risk_flags}")
-        judged = await run_judge(state)
-        return judged
-
-    # Clean scene — accept without LLM
-    return {**state, "is_valid": is_valid, "error_message": preflight_error or "", "risk_flags": risk_flags}
+    return {**state, "is_valid": is_valid, "error_message": preflight_error or ""}
 
 
 # ---------------------------------------------------------------------------

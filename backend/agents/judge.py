@@ -1,16 +1,17 @@
 """
-Judge agent: validates scene and choice quality before presenting them to the player.
+Judge: a structural gate (blocking) plus a forward quality advisor (non-blocking).
 
-Two-phase approach:
-  Phase 1 – Local checks (no LLM):
-    - _structural_preflight: hard structural errors → immediate rejection
-    - _compute_risk_flags:   soft quality signals → produces risk_flags list
+  run_gate(state) — local structural checks ONLY (no LLM). The single thing that
+    can block a scene reaching the player: missing scene, wrong choice count,
+    empty fields. Instant.
 
-  Phase 2 – LLM evaluation (only when risk_flags is non-empty):
-    - Sends scene + choices to the LLM for a quality verdict
-    - On failure → retry via storyteller (max 1 retry, unchanged)
+  review_for_next_scene(scene, choices) — runs AFTER the scene is shown. Local
+    risk flags first, then an LLM verdict only when flags exist. Returns short,
+    actionable guidance that the caller appends to ``next_scene_guidance`` so the
+    NEXT storyteller call avoids the problem. Never blocks or regenerates the
+    current scene.
 
-Final scene behaviour is unchanged: preflight pass → accepted immediately.
+Feed-forward: the player never waits on quality judgement — it compounds forward.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from dataclasses import asdict
 from dotenv import load_dotenv
 
 from graph.state import Choice, NarrativeState, Scene
-from llm.fal_llm import complete as fal_complete
+from llm.fal_llm import complete as fal_complete, FAST_LLM_MODEL
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -63,13 +64,13 @@ Evaluate all of the following:
 Respond with a single JSON object only—no markdown fences, no preamble, no explanation.
 Use exactly these keys:
 - "is_valid": boolean (true only if every check passes)
-- "reason": string (brief explanation; if valid, summarize what passed; if invalid, state what failed)
+- "reason": string (if valid, a short summary; if invalid, an ACTIONABLE instruction the writer should follow in the NEXT scene to avoid this — not just what failed)
 
 Example when valid:
 {{"is_valid": true, "reason": "Scene is vivid; three distinct choices with clear consequences."}}
 
 Example when invalid:
-{{"is_valid": false, "reason": "Choices 2 and 3 are too similar."}}"""
+{{"is_valid": false, "reason": "Make the three choices clearly distinct next time — two were near-duplicates."}}"""
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -213,132 +214,80 @@ def _parse_judgment_json(raw: str) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
-# Judge node
+# Gate (synchronous, blocking) + forward advisor (async, non-blocking)
 # ---------------------------------------------------------------------------
 
 
-async def run_judge(state: NarrativeState) -> NarrativeState:
+async def run_gate(state: NarrativeState) -> NarrativeState:
     """
-    Validate ``current_scene`` and ``choices`` using a two-phase approach.
+    Structural gate — local checks only, no LLM. The ONLY validation that blocks
+    a scene from reaching the player.
 
-    Phase 1 — Local checks (always, no LLM):
-      a) _structural_preflight: hard errors (missing fields, wrong counts) →
-         immediate rejection without retry.
-      b) _compute_risk_flags: soft quality signals → produces risk_flags list.
-         If risk_flags is empty the scene is accepted right away.
+    Catches genuinely-broken output (missing scene, wrong choice count, empty
+    fields) that can't be rendered in the UI. Soft quality is no longer judged
+    here — that moves to :func:`review_for_next_scene`, which runs after the
+    scene is shown and feeds guidance forward.
 
-    Phase 2 — LLM evaluation (only when risk_flags is non-empty):
-      Sends scene + choices to the configured LLM. On is_valid=False the
-      graph's retry logic (max 1 pass) re-runs the storyteller.
-
-    Final scene (is_final=True):
-      Preflight pass → accepted immediately; LLM is never called.
-      Preflight fail  → rejected immediately (unchanged behaviour).
+    Returns state with ``is_valid``/``error_message`` set. On failure the graph's
+    retry logic re-runs the storyteller once (structural errors only, unchanged).
     """
     current_scene = state.get("current_scene")
     choices = state.get("choices") or []
     is_final = state.get("is_final", False)
 
-    # ------------------------------------------------------------------
-    # Phase 1a: structural preflight (hard errors → immediate rejection)
-    # ------------------------------------------------------------------
     preflight_error = _structural_preflight(current_scene, choices, is_final)
     if preflight_error:
-        logger.warning("Judge preflight failed: %s", preflight_error)
-        return {
-            **state,
-            "is_valid": False,
-            "error_message": preflight_error,
-            "risk_flags": [],
-        }
+        logger.warning("Gate failed (structural): %s", preflight_error)
+        return {**state, "is_valid": False, "error_message": preflight_error}
 
-    # Final scene: preflight passed → accept without LLM (unchanged behaviour)
-    if is_final:
-        logger.info(
-            "Judge: final scene for session %s — preflight passed, accepted.",
-            state.get("session_id", ""),
-        )
-        return {
-            **state,
-            "is_valid": True,
-            "error_message": "",
-            "risk_flags": [],
-        }
-
-    assert current_scene is not None  # narrowed by preflight
-
-    # ------------------------------------------------------------------
-    # Phase 1b: risk flag computation (soft quality checks, no LLM)
-    # ------------------------------------------------------------------
-    risk_flags = _compute_risk_flags(current_scene, choices)
-
-    if not risk_flags:
-        logger.info(
-            "Judge: session %s — no risk flags, scene accepted without LLM.",
-            state.get("session_id", ""),
-        )
-        return {
-            **state,
-            "is_valid": True,
-            "error_message": "",
-            "risk_flags": [],
-        }
-
-    # ------------------------------------------------------------------
-    # Phase 2: LLM evaluation (only reached when risk_flags is non-empty)
-    # ------------------------------------------------------------------
     logger.info(
-        "Judge: session %s — risk flags %s, calling LLM.",
+        "Gate passed for session %s (is_final=%s).",
         state.get("session_id", ""),
-        risk_flags,
+        is_final,
     )
+    return {**state, "is_valid": True, "error_message": ""}
+
+
+async def review_for_next_scene(
+    scene: Scene | None, choices: list[Choice]
+) -> str | None:
+    """
+    Forward quality review — runs AFTER the scene is shown; never blocks it.
+
+    Two phases, both advisory:
+      1. Local risk flags (no LLM). Empty → clean → return None.
+      2. LLM verdict only when flags exist. If the verdict is invalid, return a
+         short, actionable guidance string; the caller appends it to
+         ``next_scene_guidance`` so the storyteller avoids it on the next scene.
+
+    Returns None when clean — or on ANY error (fail open; guidance is best-effort
+    and must never break the turn).
+    """
+    if scene is None:
+        return None
+
+    risk_flags = _compute_risk_flags(scene, choices)
+    if not risk_flags:
+        return None
 
     try:
         raw_content = await fal_complete(
             system_prompt=SYSTEM_PROMPT,
             prompt=(
                 "Evaluate this scene and choices:\n"
-                f"{_format_scene_and_choices(current_scene, choices)}"
+                f"{_format_scene_and_choices(scene, choices)}"
             ),
             temperature=0.2,
+            model=FAST_LLM_MODEL,  # a short verdict JSON — keep it cheap
+            max_tokens=512,
         )
         is_valid, reason = _parse_judgment_json(raw_content)
-
-        logger.info(
-            "Judge LLM verdict for session %s: is_valid=%s, risk_flags=%s",
-            state.get("session_id", ""),
-            is_valid,
-            risk_flags,
-        )
-
-        return {
-            **state,
-            "is_valid": is_valid,
-            "error_message": "" if is_valid else reason,
-            "risk_flags": risk_flags,
-        }
-
-    except json.JSONDecodeError as exc:
-        logger.error("Judge JSON parse failed: %s", exc)
-        return {
-            **state,
-            "is_valid": False,
-            "error_message": f"Could not parse judge response as JSON: {exc}",
-            "risk_flags": risk_flags,
-        }
-    except ValueError as exc:
-        logger.error("Judge validation failed: %s", exc)
-        return {
-            **state,
-            "is_valid": False,
-            "error_message": str(exc),
-            "risk_flags": risk_flags,
-        }
     except Exception as exc:
-        logger.exception("Judge failed")
-        return {
-            **state,
-            "is_valid": False,
-            "error_message": f"Judge error: {exc}",
-            "risk_flags": risk_flags,
-        }
+        logger.warning("Forward review failed (no guidance produced): %s", exc)
+        return None
+
+    if is_valid:
+        return None
+
+    logger.info("Forward review flagged scene (flags=%s); guidance: %s", risk_flags, reason)
+    return reason

@@ -1,9 +1,25 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Sparkles, Users, Globe2, GitBranch, ArrowRight } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import {
+  SparklesIcon,
+  UserGroupIcon,
+  Globe02Icon,
+  GitBranchIcon,
+  ArrowRight01Icon,
+} from "@hugeicons/core-free-icons";
 import heroAura from "@/assets/hero-aura.jpg";
 import { Nav } from "@/components/site/Nav";
 import { Footer } from "@/components/site/Footer";
 import { EyebrowLabel } from "@/components/site/EyebrowLabel";
+
+// Cinema icon shims (lucide → Hugeicons) — defined before the data arrays below.
+// ponytail: thin aliases to swap the icon library with a minimal diff.
+type IconProps = { className?: string };
+const Sparkles = (p: IconProps) => <HugeiconsIcon icon={SparklesIcon} {...p} />;
+const Users = (p: IconProps) => <HugeiconsIcon icon={UserGroupIcon} {...p} />;
+const Globe2 = (p: IconProps) => <HugeiconsIcon icon={Globe02Icon} {...p} />;
+const GitBranch = (p: IconProps) => <HugeiconsIcon icon={GitBranchIcon} {...p} />;
+const ArrowRight = (p: IconProps) => <HugeiconsIcon icon={ArrowRight01Icon} {...p} />;
 
 export const Route = createFileRoute("/")({
   component: Index,
@@ -98,7 +114,7 @@ function Index() {
 
           <div className="mt-16 flex items-center gap-2 text-xs text-muted-foreground animate-fade-in [animation-delay:600ms]">
             <Sparkles className="h-3.5 w-3.5 text-[color:var(--lavender)]" />
-            A demo with mocked story data — no account needed.
+            A live AI playthrough — no account needed.
           </div>
         </div>
       </section>
@@ -201,7 +217,7 @@ function Index() {
             Step into your first scene.
           </h2>
           <p className="max-w-lg text-sm leading-relaxed text-muted-foreground">
-            A short, simulated playthrough. Three scenes. Two paths. Yours.
+            A short, live playthrough. Three scenes. Three choices each. Yours.
           </p>
           <Link
             to="/demo"

@@ -7,6 +7,8 @@ const WS_URL = (import.meta.env.VITE_WS_URL as string) || "ws://localhost:8000/w
 export interface Character {
   name: string;
   description: string;
+  personality?: string;
+  backstory?: string;
 }
 
 export interface Choice {

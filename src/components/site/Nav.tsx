@@ -1,4 +1,5 @@
 import { Link } from "@tanstack/react-router";
+import { AmbientToggle } from "./AmbientToggle";
 
 export function Nav() {
   return (
@@ -15,6 +16,7 @@ export function Nav() {
         </Link>
 
         <nav className="flex items-center gap-2 text-sm">
+          <AmbientToggle />
           <Link
             to="/"
             activeOptions={{ exact: true }}

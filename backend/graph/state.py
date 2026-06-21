@@ -85,8 +85,12 @@ class NarrativeState(TypedDict):
     is_valid: bool  # Whether the last validation step passed
     error_message: str  # Details when is_valid is False
     session_id: str  # Unique identifier for persistence and tracing
-    storyteller_retry_count: NotRequired[int]  # Judge retries; max 1 re-run of storyteller
+    storyteller_retry_count: NotRequired[int]  # Structural-gate retries; max 1 re-run of storyteller
     scene_count: NotRequired[int]  # Number of scenes played so far (default 0)
     is_final: NotRequired[bool]  # Whether the next scene should be a conclusive ending
     story_summary: NotRequired[str]  # 2-3 sentence summary of the whole story (set on final scene)
-    risk_flags: NotRequired[List[str]]  # Local quality flags; non-empty triggers LLM judge
+    risk_flags: NotRequired[List[str]]  # Local quality flags; non-empty triggers the forward LLM review
+    # Feed-forward guidance: checkers no longer block/regenerate the current output.
+    # They ship it, then write findings here so the NEXT scene/image avoids the issue.
+    next_scene_guidance: NotRequired[List[str]]  # Judge notes injected into the next storyteller call
+    visual_continuity_notes: NotRequired[List[str]]  # Continuity-checker notes prepended to the next image prompt

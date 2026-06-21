@@ -21,7 +21,7 @@ import re
 
 from dotenv import load_dotenv
 
-from llm.fal_llm import complete as fal_complete
+from llm.fal_llm import complete as fal_complete, FAST_LLM_MODEL
 
 load_dotenv()
 
@@ -49,25 +49,30 @@ async def run_continuity_check(style_guide: str, prompt: str) -> dict:
     """
     Check a rendering prompt against the style guide.
 
-    Returns ``{"consistent": bool, "revised_prompt": str}``. On any error, returns
-    ``consistent=True`` with the original prompt (fail-open, never blocks rendering).
+    Returns ``{"consistent": bool, "issues": str, "revised_prompt": str}``. On any
+    error, returns ``consistent=True`` (fail-open, never blocks rendering).
+
+    ``issues`` is the actionable note the caller feeds FORWARD into the next scene's
+    image prompt — the shown image is never re-rendered.
     """
     if not style_guide or not prompt:
-        return {"consistent": True, "revised_prompt": prompt}
+        return {"consistent": True, "issues": "", "revised_prompt": prompt}
 
     try:
         raw = await fal_complete(
             system_prompt=SYSTEM_PROMPT,
             prompt=json.dumps({"style_guide": style_guide, "prompt": prompt}, indent=2),
             temperature=0.2,
+            model=FAST_LLM_MODEL,  # mechanical consistency check — keep it cheap
         )
         data = json.loads(_strip_json_fences(raw))
         consistent = bool(data.get("consistent", True))
+        issues = str(data.get("issues") or "").strip()
         revised = str(data.get("revised_prompt") or "").strip() or prompt
         if not consistent:
-            logger.info("Continuity Checker flagged a prompt: %s", data.get("issues", ""))
-        return {"consistent": consistent, "revised_prompt": revised}
+            logger.info("Continuity Checker flagged a prompt: %s", issues)
+        return {"consistent": consistent, "issues": issues, "revised_prompt": revised}
     except Exception as exc:
         # Fail open: never block image generation on a continuity hiccup.
         logger.warning("Continuity check failed (accepting image as-is): %s", exc)
-        return {"consistent": True, "revised_prompt": prompt}
+        return {"consistent": True, "issues": "", "revised_prompt": prompt}
