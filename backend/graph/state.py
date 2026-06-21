@@ -89,3 +89,4 @@ class NarrativeState(TypedDict):
     scene_count: NotRequired[int]  # Number of scenes played so far (default 0)
     is_final: NotRequired[bool]  # Whether the next scene should be a conclusive ending
     story_summary: NotRequired[str]  # 2-3 sentence summary of the whole story (set on final scene)
+    risk_flags: NotRequired[List[str]]  # Local quality flags; non-empty triggers LLM judge

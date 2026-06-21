@@ -32,6 +32,7 @@ from agents.character_portrait_artist import render_portrait
 from agents.world_environment_artist import render_environment
 from agents.scene_composer import render_scene
 from agents.visual_continuity_checker import run_continuity_check
+from agents.story_reviewer import run_story_reviewer
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
@@ -516,32 +517,13 @@ async def handle_make_choice(
     # --- Run storyteller + judge only (no orchestrator / world / character setup) ---
     final_state = await run_continuation(state)
 
-    # --- Persist updated session state (durable write path) ---
+    # --- Update the connection-cached session in place ---
+    # Done BEFORE sending choice_applied so the cache is always consistent.
     updated_characters = [asdict(c) for c in final_state.get("characters") or []]
     updated_world = asdict(final_state["world"]) if final_state.get("world") else {}
     # Keep the model presets / style guide even if the graph didn't re-emit outline.
     updated_outline = {**outline0, **(final_state.get("story_outline") or {})}
 
-    await update_session_state(
-        session_id,
-        scene_count=scene_count,
-        story_outline=updated_outline,
-        characters=updated_characters,
-        world=updated_world,
-    )
-
-    # --- Persist the new scene ---
-    if final_state.get("current_scene"):
-        await save_scene(
-            session_id,
-            {
-                "scene_text": final_state["current_scene"].scene_text,
-                "location": final_state["current_scene"].location,
-                "status": final_state["current_scene"].status,
-            },
-        )
-
-    # --- Update the connection-cached session in place (mirrors the DB write) ---
     session["scene_count"] = scene_count
     session["story_outline"] = updated_outline
     session["characters"] = final_state.get("characters") or session.get("characters") or []
@@ -575,7 +557,41 @@ async def handle_make_choice(
             for c in final_state.get("choices") or []
         ]
 
+    # Send the new scene to the client immediately — DB writes happen in the background.
     await send_message(websocket, "choice_applied", response)
+
+    # --- Persist to DB in background (non-blocking) ---
+    # The session cache above is already updated, so the next make_choice call
+    # will use the in-memory data even if the background writes haven’t finished yet.
+    _scene_payload = (
+        {
+            "scene_text": final_state["current_scene"].scene_text,
+            "location": final_state["current_scene"].location,
+            "status": final_state["current_scene"].status,
+        }
+        if final_state.get("current_scene")
+        else None
+    )
+
+    async def _persist_to_db() -> None:
+        try:
+            await asyncio.gather(
+                update_session_state(
+                    session_id,
+                    scene_count=scene_count,
+                    story_outline=updated_outline,
+                    characters=updated_characters,
+                    world=updated_world,
+                ),
+                save_scene(session_id, _scene_payload) if _scene_payload else asyncio.sleep(0),
+            )
+        except Exception:
+            logger.warning(
+                "Background DB persist failed for session %s — session continues in memory",
+                session_id,
+            )
+
+    asyncio.create_task(_persist_to_db())
 
     # Visual layer: stream the scene illustration, reusing the saved style guide.
     style_guide = updated_outline.get("visual_style_guide", "")
@@ -591,6 +607,43 @@ async def handle_make_choice(
     )
 
     return session
+
+
+async def handle_review_story(
+    websocket: WebSocket,
+    session_id: str,
+    session: Optional[dict[str, Any]],
+) -> None:
+    """
+    Run a holistic Story Review on the completed story and send the result back.
+
+    Uses the connection-scoped session cache (or falls back to a DB load on
+    reconnect).  Sends ``review_started`` immediately so the client can show
+    a loading state, then sends ``story_review`` with the full analysis.
+    """
+    if not session:
+        session = await get_session(session_id)
+    if not session:
+        await send_message(websocket, "error", {"message": "Session not found — cannot review."})
+        return
+
+    try:
+        await send_message(websocket, "review_started", {})
+        review = await run_story_reviewer(
+            story_outline=session.get("story_outline") or {},
+            characters=session.get("characters") or [],
+            world=session.get("world"),
+            scene_history=session.get("scene_history") or [],
+            user_idea=session.get("user_idea", ""),
+        )
+        await send_message(websocket, "story_review", {"review": review})
+    except Exception as exc:
+        logger.exception("Story review failed for session %s", session_id)
+        await send_message(
+            websocket,
+            "error",
+            {"message": f"Story review failed: {exc}"},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -670,13 +723,15 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 session = await handle_start_story(websocket, payload, session_id)
             elif message_type == "make_choice":
                 session = await handle_make_choice(websocket, payload, session_id, session)
+            elif message_type == "review_story":
+                await handle_review_story(websocket, session_id, session)
             else:
                 await send_message(
                     websocket,
                     "error",
                     {
                         "message": f"Unknown message type: {message_type}",
-                        "supported_types": ["start_story", "make_choice"],
+                        "supported_types": ["start_story", "make_choice", "review_story"],
                     },
                 )
 

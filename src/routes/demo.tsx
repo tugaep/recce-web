@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, RotateCcw, Sparkles, ArrowRight, BookOpen, Aperture } from "lucide-react";
 import { Nav } from "@/components/site/Nav";
 import { Footer } from "@/components/site/Footer";
@@ -79,6 +79,22 @@ function DemoPage() {
   const [allScenes, setAllScenes] = useState<SceneEntry[]>([]);
   const [visuals, setVisuals] = useState<VisualState>(emptyVisualState);
   const [errorMsg, setErrorMsg] = useState("");
+  // Prevents ScenePlayer re-mounting (and re-streaming old text) while the
+  // backend generates the next chapter. history is updated only when
+  // choice_applied arrives with the new scene.
+  const [isWaitingForScene, setIsWaitingForScene] = useState(false);
+  const pendingChoiceRef = useRef<string | null>(null);
+
+  // Post-story review (opt-in from the summary page)
+  type StoryReview = {
+    overall_impression: string;
+    narrative_arc: string;
+    inconsistencies: { type: string; description: string }[];
+    highlights: string[];
+    suggestions: string[];
+  };
+  const [review, setReview] = useState<StoryReview | null>(null);
+  const [isReviewing, setIsReviewing] = useState(false);
 
   useEffect(() => {
     if (!lastMessage) return;
@@ -106,12 +122,24 @@ function DemoPage() {
         choices: WsChoice[];
         is_final?: boolean;
       };
+      // Flush the pending choice into history now that the new scene is ready.
+      // This ensures ScenePlayer re-mounts (via key={history.length}) only once
+      // the new scene text is available, avoiding re-streaming of the old chapter.
+      if (pendingChoiceRef.current !== null) {
+        const choiceLabel = pendingChoiceRef.current;
+        pendingChoiceRef.current = null;
+        setHistory((h) => [
+          ...h,
+          { sceneTitle: currentScene?.location ?? "", choiceLabel },
+        ]);
+      }
       setCurrentScene(p.scene);
       setChoices(p.choices);
       setIsFinal(Boolean(p.is_final));
       setAllScenes((prev) => [...prev, { scene: p.scene, choice: null }]);
       // New scene begins rendering — clear the prior scene image, keep cast/world.
       setVisuals((prev) => resetScene(prev));
+      setIsWaitingForScene(false);
       setStage("play");
     }
 
@@ -125,11 +153,21 @@ function DemoPage() {
       setVisuals((prev) => applyImageReady(prev, p));
     }
 
+    if (msg.type === "review_started") {
+      setIsReviewing(true);
+    }
+
+    if (msg.type === "story_review") {
+      const p = msg.payload as { review: StoryReview };
+      setReview(p.review);
+      setIsReviewing(false);
+    }
+
     if (msg.type === "error") {
       const p = msg.payload as { message?: string };
       setErrorMsg(p?.message || "Something went wrong while building your story.");
-      // Only the generation phase has nothing to show — surface a recoverable screen.
       setStage((s) => (s === "dreaming" ? "error" : s));
+      setIsReviewing(false);
     }
   }, [lastMessage]);
 
@@ -143,7 +181,11 @@ function DemoPage() {
   }
 
   function chooseScene(choiceLabel: string) {
-    setHistory((h) => [...h, { sceneTitle: currentScene?.location ?? "", choiceLabel }]);
+    // Store the choice label — history is updated when choice_applied arrives
+    // so ScenePlayer's key doesn't change (and re-mount) before the new scene
+    // text is ready, which was causing the old chapter to stream again.
+    pendingChoiceRef.current = choiceLabel;
+    setIsWaitingForScene(true);
     setAllScenes((prev) =>
       prev.map((s, i) => (i === prev.length - 1 ? { ...s, choice: choiceLabel } : s)),
     );
@@ -163,6 +205,15 @@ function DemoPage() {
     setVisuals(emptyVisualState);
     setErrorMsg("");
     setProgressStage(null);
+    setIsWaitingForScene(false);
+    pendingChoiceRef.current = null;
+    setReview(null);
+    setIsReviewing(false);
+  }
+
+  function handleReview() {
+    if (isReviewing || review) return;
+    sendMessage("review_story", {});
   }
 
   return (
@@ -300,6 +351,7 @@ function DemoPage() {
             history={history}
             isFinal={isFinal}
             visuals={visuals}
+            isWaiting={isWaitingForScene}
             onChoose={chooseScene}
             onRestart={restart}
             onBack={() => setStage("reveal")}
@@ -315,6 +367,9 @@ function DemoPage() {
             allScenes={allScenes}
             visuals={visuals}
             onRestart={restart}
+            onReview={handleReview}
+            isReviewing={isReviewing}
+            review={review}
           />
         )}
       </main>
@@ -560,6 +615,7 @@ function ScenePlayer({
   history,
   isFinal,
   visuals,
+  isWaiting,
   onChoose,
   onRestart,
   onBack,
@@ -570,6 +626,7 @@ function ScenePlayer({
   history: ChoiceTaken[];
   isFinal: boolean;
   visuals: VisualState;
+  isWaiting: boolean;
   onChoose: (label: string) => void;
   onRestart: () => void;
   onBack: () => void;
@@ -631,8 +688,29 @@ function ScenePlayer({
         </div>
       </div>
 
-      {/* choices or epilogue */}
-      {isFinal ? (
+      {/* choices / loading / epilogue */}
+      {isWaiting ? (
+        <div className="mt-12">
+          <EyebrowLabel>Your move</EyebrowLabel>
+          <div className="mt-5 flex items-center gap-4 rounded-none border-2 border-hairline bg-surface px-6 py-8">
+            <div className="relative flex h-10 w-10 shrink-0 items-center justify-center">
+              <div className="absolute inset-0 animate-breathe rounded-full bg-aura blur-lg" />
+              <Aperture
+                className="animate-spin-slow relative h-5 w-5 text-[color:var(--lavender)]"
+                strokeWidth={1.25}
+              />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-[color:var(--lavender)] animate-pulse">
+                Writing the next scene…
+              </p>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                Your choice has been made. The story is continuing.
+              </p>
+            </div>
+          </div>
+        </div>
+      ) : isFinal ? (
         <div className="mt-12 border-2 border-hairline bg-surface p-10 text-center">
           <EyebrowLabel>End</EyebrowLabel>
           <p className="mx-auto mt-5 max-w-md font-display text-2xl font-light italic leading-relaxed text-foreground">
@@ -685,6 +763,9 @@ function StorySummary({
   allScenes,
   visuals,
   onRestart,
+  onReview,
+  isReviewing,
+  review,
 }: {
   idea: string;
   world: WsWorld | null;
@@ -692,6 +773,15 @@ function StorySummary({
   allScenes: SceneEntry[];
   visuals: VisualState;
   onRestart: () => void;
+  onReview: () => void;
+  isReviewing: boolean;
+  review: {
+    overall_impression: string;
+    narrative_arc: string;
+    inconsistencies: { type: string; description: string }[];
+    highlights: string[];
+    suggestions: string[];
+  } | null;
 }) {
   return (
     <section className="animate-fade-up">
@@ -804,6 +894,110 @@ function StorySummary({
             );
           })}
         </div>
+      </div>
+
+      {/* Story Review — opt-in after story completion */}
+      <div className="mt-20">
+        {!review && !isReviewing && (
+          <div className="border-2 border-hairline bg-surface p-10 text-center">
+            <EyebrowLabel>Story Review</EyebrowLabel>
+            <p className="mx-auto mt-4 max-w-md text-sm leading-relaxed text-muted-foreground">
+              Want a literary editor's take? Get a holistic review of your story —
+              character consistency, narrative arc, and suggestions for a future telling.
+            </p>
+            <button
+              onClick={onReview}
+              className="mt-8 inline-flex items-center gap-2 border-2 border-[color:var(--lavender)] bg-background px-6 py-3 text-sm font-medium text-[color:var(--lavender)] transition-all duration-300 hover:bg-[color:var(--lavender)] hover:text-background"
+            >
+              <Sparkles className="h-4 w-4" />
+              Evaluate my story
+            </button>
+          </div>
+        )}
+
+        {isReviewing && (
+          <div className="border-2 border-hairline bg-surface p-10 text-center">
+            <div className="relative mx-auto flex h-14 w-14 items-center justify-center">
+              <div className="absolute inset-0 animate-breathe rounded-full bg-aura blur-xl" />
+              <Aperture
+                className="animate-spin-slow relative h-8 w-8 text-[color:var(--lavender)]"
+                strokeWidth={1.25}
+              />
+            </div>
+            <p className="mt-6 text-sm font-medium uppercase tracking-[0.2em] text-[color:var(--lavender)] animate-pulse">
+              Reading your story
+            </p>
+            <p className="mt-2 text-xs text-muted-foreground">
+              The editor is reviewing all scenes for consistency and craft…
+            </p>
+          </div>
+        )}
+
+        {review && (
+          <div className="animate-fade-up border-2 border-[color:var(--lavender)] bg-surface">
+            {/* Overall */}
+            <div className="border-b-2 border-hairline p-8">
+              <EyebrowLabel>Story Review</EyebrowLabel>
+              <p className="mt-4 text-base leading-relaxed text-foreground">
+                {review.overall_impression}
+              </p>
+            </div>
+
+            {/* Arc + Inconsistencies */}
+            <div className="grid divide-y-2 divide-hairline md:grid-cols-2 md:divide-x-2 md:divide-y-0">
+              <div className="p-8">
+                <EyebrowLabel>Narrative Arc</EyebrowLabel>
+                <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+                  {review.narrative_arc}
+                </p>
+              </div>
+              {review.inconsistencies.length > 0 && (
+                <div className="p-8">
+                  <EyebrowLabel>Inconsistencies</EyebrowLabel>
+                  <ul className="mt-3 space-y-3">
+                    {review.inconsistencies.map((item, i) => (
+                      <li key={i} className="flex items-start gap-3">
+                        <span className="mt-1.5 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-[color:var(--lavender)]" />
+                        <div>
+                          <span className="eyebrow text-[10px]">{item.type}</span>
+                          <p className="mt-0.5 text-sm leading-relaxed text-muted-foreground">
+                            {item.description}
+                          </p>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+
+            {/* Highlights + Suggestions */}
+            <div className="grid divide-y-2 divide-hairline border-t-2 border-hairline md:grid-cols-2 md:divide-x-2 md:divide-y-0">
+              <div className="p-8">
+                <EyebrowLabel>Highlights</EyebrowLabel>
+                <ul className="mt-3 space-y-2">
+                  {review.highlights.map((item, i) => (
+                    <li key={i} className="flex items-start gap-3 text-sm leading-relaxed text-foreground">
+                      <span className="mt-1.5 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-[color:var(--lavender)]" />
+                      {item}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div className="p-8">
+                <EyebrowLabel>Suggestions</EyebrowLabel>
+                <ul className="mt-3 space-y-2">
+                  {review.suggestions.map((item, i) => (
+                    <li key={i} className="flex items-start gap-3 text-sm leading-relaxed text-muted-foreground">
+                      <span className="mt-1.5 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-[color:var(--lavender)]" />
+                      {item}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Footer */}
