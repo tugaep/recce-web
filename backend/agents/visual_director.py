@@ -167,6 +167,7 @@ def build_scene_prompt(
     location: str,
     characters: list[Character],
     world: WorldInfo | None,
+    continuity_notes: list[str] | None = None,
 ) -> str:
     """
     Compose a scene-illustration prompt deterministically — no LLM call.
@@ -174,13 +175,19 @@ def build_scene_prompt(
     The style guide is already established at story start, so per-scene images can
     skip the Scene Director round-trip (~15s) and assemble a strong prompt from the
     style guide + scene prose + cast. Keeps choices snappy.
+
+    ``continuity_notes`` are forward corrections from the visual continuity checker
+    on earlier frames (e.g. "palette drifted warm"); prepending them steers this
+    render back on-style instead of re-rendering the previous one.
     """
     cast = ", ".join(c.name for c in characters[:3])
     where = location or (world.location_name if world else "")
     # Trim prose to keep the prompt focused on the visible moment.
     summary = " ".join((scene_text or "").split())[:320]
+    notes = "; ".join(n for n in (continuity_notes or []) if n)
     parts = [
         style_guide.strip(),
+        f"Continuity corrections to apply: {notes}." if notes else "",
         f"Cinematic frame{f' at {where}' if where else ''}.",
         summary,
         f"Featuring {cast}." if cast else "",

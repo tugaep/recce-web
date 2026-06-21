@@ -16,12 +16,12 @@ from functools import partial
 from typing import Any, Awaitable, Callable, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from dataclasses import asdict
 
-from graph.graph import run_continuation, run_narrative
+from graph.graph import run_continuation, run_setup, run_first_scene
 from graph.state import NarrativeState
 from llm.fal_llm import set_request_model
 from db.supabase_client import get_session, save_scene, save_session, update_session_state
@@ -32,6 +32,8 @@ from agents.character_portrait_artist import render_portrait
 from agents.world_environment_artist import render_environment
 from agents.scene_composer import render_scene
 from agents.visual_continuity_checker import run_continuity_check
+from agents.story_reviewer import run_story_reviewer
+from agents.judge import review_for_next_scene
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
@@ -117,6 +119,26 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/story/{session_id}")
+async def get_story(session_id: str) -> dict[str, Any]:
+    """
+    Read-only fetch of a story by id — powers shareable links. Returns the idea,
+    cast, world, and scene history (with image URLs) so a fresh visitor can view a
+    finished story without a WebSocket session.
+    """
+    session = await get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Story not found")
+    world = session.get("world")
+    return {
+        "session_id": session_id,
+        "user_idea": session.get("user_idea", ""),
+        "characters": [asdict(c) for c in session.get("characters") or []],
+        "world": asdict(world) if world else None,
+        "scenes": [asdict(s) for s in session.get("scene_history") or []],
+    }
+
+
 # ---------------------------------------------------------------------------
 # WebSocket helpers
 # ---------------------------------------------------------------------------
@@ -125,6 +147,14 @@ async def health() -> dict[str, str]:
 async def send_message(websocket: WebSocket, message_type: str, payload: Any) -> None:
     """Send a JSON envelope with type and payload fields."""
     await websocket.send_json({"type": message_type, "payload": payload})
+
+
+async def _persist_quietly(coro: Awaitable[Any]) -> None:
+    """Await a DB write, swallowing failures — the in-memory connection cache is authoritative."""
+    try:
+        await coro
+    except Exception:
+        logger.warning("Background DB write failed — session continues from the in-memory cache")
 
 
 # ---------------------------------------------------------------------------
@@ -140,15 +170,17 @@ async def _stream_renders(
     session_id: str,
     style_guide: str,
     jobs: list[tuple[str, Optional[int], str, Renderer]],
+    notes_sink: Optional[list[str]] = None,
 ) -> dict[tuple[str, Optional[int]], Optional[str]]:
     """
     Run render jobs concurrently, emitting an ``image_ready`` the moment each
-    image renders — then refine it in the background via the continuity checker.
+    image renders — then run a feed-forward continuity check.
 
     ``jobs`` is a list of ``(target, index, prompt, render_fn)``. For each job:
       1. render the image and emit ``image_ready`` immediately (fastest UX), then
-      2. run a best-effort continuity check; if it flags an inconsistency,
-         regenerate once and emit again — the frontend replaces the prior image.
+      2. if ``notes_sink`` is given, run a best-effort continuity check; any drift
+         is recorded as a note for the NEXT scene's prompt — the shown image is
+         never re-rendered (no costly second render on the critical path).
 
     Socket sends are serialized with a lock so frames never interleave. Returns a
     map of ``(target, index) -> final url`` for persistence.
@@ -179,16 +211,18 @@ async def _stream_renders(
         results[(target, index)] = url
         await emit(target, index, url)  # show it as soon as it exists
 
-        # Best-effort continuity refinement (never blocks the already-shown image).
-        try:
-            check = await run_continuity_check(style_guide, prompt)
-            revised = check.get("revised_prompt") or prompt
-            if not check.get("consistent", True) and revised != prompt:
-                refined = await render_fn(revised)
-                results[(target, index)] = refined
-                await emit(target, index, refined)  # frontend swaps to the refined image
-        except Exception:
-            logger.warning("Continuity refine failed for %s; keeping first render", target)
+        # Feed-forward continuity: the shown image stays. If the checker flags drift,
+        # record a note so the NEXT scene's prompt corrects it — no re-render here.
+        if notes_sink is not None:
+            try:
+                check = await run_continuity_check(style_guide, prompt)
+                if not check.get("consistent", True):
+                    issue = (check.get("issues") or "").strip()
+                    if issue:
+                        notes_sink.append(issue)
+                        logger.info("Continuity note for %s recorded: %s", target, issue)
+            except Exception:
+                logger.warning("Continuity check failed for %s; no note recorded", target)
 
     await asyncio.gather(
         *(run_job(target, index, prompt, fn) for (target, index, prompt, fn) in jobs if prompt)
@@ -206,6 +240,7 @@ async def generate_initial_visuals(
     scene: Any,
     img_model: str | None = None,
     img_quality: str | None = None,
+    notes_sink: list[str] | None = None,
 ) -> None:
     """
     Story-start visual pass: Visual Director -> render cast/world/scene -> stream.
@@ -249,7 +284,7 @@ async def generate_initial_visuals(
     if scene_prompt:
         jobs.append(("scene", None, scene_prompt, scene_fn))
 
-    results = await _stream_renders(websocket, session_id, style_guide, jobs)
+    results = await _stream_renders(websocket, session_id, style_guide, jobs, notes_sink=notes_sink)
 
     # Record URLs back onto the objects.
     for i, c in enumerate(characters):
@@ -281,11 +316,15 @@ async def generate_scene_visual(
     world: Any,
     img_model: str | None = None,
     img_quality: str | None = None,
+    continuity_notes: list[str] | None = None,
+    notes_sink: list[str] | None = None,
 ) -> None:
     """
     Continuation visual pass: Scene Director -> Scene Composer -> stream one image.
 
     Reuses the established ``style_guide`` so the new scene matches prior images.
+    ``continuity_notes`` (forward corrections from earlier frames) steer this render
+    back on-style; ``notes_sink`` collects any new drift for the following scene.
     Fail-open: any error simply omits the scene image.
     """
     if scene is None or not (scene.scene_text or "").strip():
@@ -293,12 +332,14 @@ async def generate_scene_visual(
 
     # Deterministic prompt from the established style guide — no LLM round-trip.
     prompt = build_scene_prompt(
-        style_guide, scene.scene_text, scene.location, characters, world
+        style_guide, scene.scene_text, scene.location, characters, world,
+        continuity_notes=continuity_notes,
     )
 
     scene_fn = partial(render_scene, model=img_model, quality=img_quality)
     results = await _stream_renders(
-        websocket, session_id, style_guide, [("scene", None, prompt, scene_fn)]
+        websocket, session_id, style_guide, [("scene", None, prompt, scene_fn)],
+        notes_sink=notes_sink,
     )
     scene.image_url = results.get(("scene", None))
 
@@ -339,6 +380,36 @@ def _placeholder_choice_applied(choice: str, session_id: str) -> dict[str, Any]:
     }
 
 
+async def _forward_scene_review(session: dict[str, Any], scene: Any, choices: list) -> None:
+    """
+    Run the quality judge AFTER a scene was shown and stash actionable guidance for
+    the NEXT scene. Fire-and-forget: the user's reading time covers the latency, so
+    the player never waits on it; any failure is swallowed (guidance is best-effort).
+    """
+    try:
+        guidance = await review_for_next_scene(scene, choices)
+        if guidance:
+            session.setdefault("next_scene_guidance", []).append(guidance)
+            logger.info("Forward guidance queued for next scene: %s", guidance)
+    except Exception:
+        logger.warning("Forward scene review failed; continuing without guidance")
+
+
+async def _await_pending_review(session: dict[str, Any]) -> None:
+    """
+    Let an in-flight forward review finish before building the next storyteller
+    prompt, but never wait long. It has almost always completed during the user's
+    reading/think time; the 0.15s cap is just a safety net (the task keeps running
+    if it isn't done, landing its guidance on a later turn).
+    """
+    pending = session.get("_pending_review")
+    if pending is not None and not pending.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(pending), timeout=0.15)
+        except Exception:
+            pass
+
+
 async def handle_start_story(
     websocket: WebSocket, payload: dict[str, Any], session_id: str
 ) -> Optional[dict[str, Any]]:
@@ -377,37 +448,76 @@ async def handle_start_story(
         "storyteller_retry_count": 0,
     }
 
-    final_state = await run_narrative(state, on_progress=emit_progress)
+    # --- Setup phase 1: orchestrator -> cast ‖ world (storyteller NOT run yet) ---
+    setup_state = await run_setup(state, on_progress=emit_progress)
 
     # Story outline carries the model presets so continuation turns reuse them
     # (persisted in the jsonb column — no schema change needed).
-    story_outline: dict = final_state.get("story_outline") or {}
+    story_outline: dict = setup_state.get("story_outline") or {}
     story_outline["text_preset"] = text_preset if isinstance(text_preset, str) else DEFAULT_TEXT_PRESET
     story_outline["image_preset"] = (
         image_preset if isinstance(image_preset, str) else DEFAULT_IMAGE_PRESET
     )
 
-    # Serialize rich state objects for DB persistence
-    characters_dicts = [asdict(c) for c in final_state.get("characters") or []]
-    world_dict = asdict(final_state["world"]) if final_state.get("world") else {}
+    characters = setup_state.get("characters") or []
+    world = setup_state.get("world")
+    world_dict = asdict(world) if world else {}
 
-    await save_session(
-        session_id,
-        idea.strip(),
-        scene_count=0,
-        story_outline=story_outline,
-        characters=characters_dicts,
-        world=world_dict,
+    # Persist the session row in the background — the connection cache (returned below)
+    # is authoritative for this session, so the player never waits on the DB. The
+    # visual pass's update runs tens of seconds later, well after this completes.
+    asyncio.create_task(
+        _persist_quietly(
+            save_session(
+                session_id,
+                idea.strip(),
+                scene_count=0,
+                story_outline=story_outline,
+                characters=[asdict(c) for c in characters],
+                world=world_dict,
+            )
+        )
     )
 
+    # Progressive reveal: stream the cast and world the moment they exist — ~10s
+    # before the opening scene finishes writing. The user reads character cards
+    # while the storyteller works. (story_started still carries them too, so a
+    # client that missed these frames still renders correctly.)
+    await send_message(
+        websocket,
+        "cast_ready",
+        {
+            "session_id": session_id,
+            "characters": [
+                {
+                    "name": c.name,
+                    "description": c.description,
+                    "personality": c.personality,
+                    "backstory": c.backstory,
+                }
+                for c in characters
+            ],
+        },
+    )
+    await send_message(
+        websocket, "world_ready", {"session_id": session_id, "world": world_dict}
+    )
+
+    # --- Setup phase 2: storyteller -> structural gate (single retry on breakage) ---
+    final_state = await run_first_scene(setup_state)
+
     if final_state.get("current_scene"):
-        await save_scene(
-            session_id,
-            {
-                "scene_text": final_state["current_scene"].scene_text,
-                "location": final_state["current_scene"].location,
-                "status": final_state["current_scene"].status,
-            },
+        asyncio.create_task(
+            _persist_quietly(
+                save_scene(
+                    session_id,
+                    {
+                        "scene_text": final_state["current_scene"].scene_text,
+                        "location": final_state["current_scene"].location,
+                        "status": final_state["current_scene"].status,
+                    },
+                )
+            )
         )
 
     await send_message(
@@ -429,37 +539,57 @@ async def handle_start_story(
                 for c in final_state.get("choices") or []
             ],
             "characters": [
-                {"name": c.name, "description": c.description}
+                {
+                    "name": c.name,
+                    "description": c.description,
+                    "personality": c.personality,
+                    "backstory": c.backstory,
+                }
                 for c in final_state.get("characters") or []
             ],
             "world": world_dict,
         },
     )
 
-    # Visual layer: generate and stream images now that the text is on screen.
-    # Mutates story_outline (style guide) + character/world image_url in place, so
-    # the cached session below reflects the enriched state.
-    await generate_initial_visuals(
-        websocket,
-        session_id,
-        story_outline=story_outline,
-        characters=final_state.get("characters") or [],
-        world=final_state.get("world"),
-        scene=final_state.get("current_scene"),
-        img_model=img_model,
-        img_quality=img_quality,
-    )
-
     # Connection-scoped session cache — mirrors get_session()'s shape so make_choice
-    # can skip the DB reload every turn. scene_history holds saved Scene objects.
-    return {
+    # can skip the DB reload every turn. Built BEFORE the visual pass so the forward
+    # review and continuity notes have somewhere to land. scene_history holds Scenes.
+    session: dict[str, Any] = {
         "user_idea": idea.strip(),
         "scene_count": 0,
         "story_outline": story_outline,
         "characters": final_state.get("characters") or [],
         "world": final_state.get("world"),
         "scene_history": [final_state["current_scene"]] if final_state.get("current_scene") else [],
+        "next_scene_guidance": [],
+        "visual_continuity_notes": [],
     }
+
+    # Feed-forward: review the opening scene → guidance for scene 2. Runs concurrently
+    # with the visual pass and finishes long before the first choice. Never blocks.
+    session["_pending_review"] = asyncio.create_task(
+        _forward_scene_review(
+            session, final_state.get("current_scene"), final_state.get("choices") or []
+        )
+    )
+
+    # Visual layer: generate and stream images now that the text is on screen.
+    # Mutates story_outline (style guide) + character/world image_url in place, so
+    # the cached session reflects the enriched state. Continuity drift is recorded
+    # into visual_continuity_notes for the next scene's prompt (no re-render).
+    await generate_initial_visuals(
+        websocket,
+        session_id,
+        story_outline=story_outline,
+        characters=session["characters"],
+        world=session["world"],
+        scene=final_state.get("current_scene"),
+        img_model=img_model,
+        img_quality=img_quality,
+        notes_sink=session["visual_continuity_notes"],
+    )
+
+    return session
 
 
 async def handle_make_choice(
@@ -485,6 +615,10 @@ async def handle_make_choice(
         await send_message(websocket, "error", {"message": "Session not found."})
         return None
 
+    # Let the previous scene's forward review finish (best-effort) so its guidance is
+    # woven into this scene. It has almost always completed during the user's think time.
+    await _await_pending_review(session)
+
     # Re-apply the session's locked model choices for this turn.
     outline0 = session.get("story_outline") or {}
     set_request_model(resolve_text_model(outline0.get("text_preset")))
@@ -506,6 +640,8 @@ async def handle_make_choice(
         "characters": session.get("characters") or [],
         "world": session.get("world"),
         "scene_history": session.get("scene_history") or [],
+        # Feed-forward guidance from the previous scene's review (shapes this scene).
+        "next_scene_guidance": session.get("next_scene_guidance") or [],
         # Reset per-turn fields
         "current_scene": None,
         "choices": [],
@@ -513,35 +649,24 @@ async def handle_make_choice(
         "error_message": "",
     }
 
-    # --- Run storyteller + judge only (no orchestrator / world / character setup) ---
-    final_state = await run_continuation(state)
+    # Stream the scene prose to the client as it's written (continuation only — the
+    # opening scene streams behind the reveal page, where it isn't visible anyway).
+    async def emit_delta(text: str) -> None:
+        try:
+            await send_message(websocket, "scene_delta", {"session_id": session_id, "text": text})
+        except Exception:
+            pass
 
-    # --- Persist updated session state (durable write path) ---
+    # --- Run storyteller + structural gate (no orchestrator / world / character setup) ---
+    final_state = await run_continuation(state, on_delta=emit_delta)
+
+    # --- Update the connection-cached session in place ---
+    # Done BEFORE sending choice_applied so the cache is always consistent.
     updated_characters = [asdict(c) for c in final_state.get("characters") or []]
     updated_world = asdict(final_state["world"]) if final_state.get("world") else {}
     # Keep the model presets / style guide even if the graph didn't re-emit outline.
     updated_outline = {**outline0, **(final_state.get("story_outline") or {})}
 
-    await update_session_state(
-        session_id,
-        scene_count=scene_count,
-        story_outline=updated_outline,
-        characters=updated_characters,
-        world=updated_world,
-    )
-
-    # --- Persist the new scene ---
-    if final_state.get("current_scene"):
-        await save_scene(
-            session_id,
-            {
-                "scene_text": final_state["current_scene"].scene_text,
-                "location": final_state["current_scene"].location,
-                "status": final_state["current_scene"].status,
-            },
-        )
-
-    # --- Update the connection-cached session in place (mirrors the DB write) ---
     session["scene_count"] = scene_count
     session["story_outline"] = updated_outline
     session["characters"] = final_state.get("characters") or session.get("characters") or []
@@ -575,10 +700,56 @@ async def handle_make_choice(
             for c in final_state.get("choices") or []
         ]
 
+    # Send the new scene to the client immediately — DB writes happen in the background.
     await send_message(websocket, "choice_applied", response)
 
+    # Feed-forward: review THIS scene → guidance for the next one. No scene follows the
+    # finale, so skip it there. Runs during the user's reading time; never blocks.
+    if not is_final:
+        session["_pending_review"] = asyncio.create_task(
+            _forward_scene_review(
+                session, final_state.get("current_scene"), final_state.get("choices") or []
+            )
+        )
+
+    # --- Persist to DB in background (non-blocking) ---
+    # The session cache above is already updated, so the next make_choice call
+    # will use the in-memory data even if the background writes haven’t finished yet.
+    _scene_payload = (
+        {
+            "scene_text": final_state["current_scene"].scene_text,
+            "location": final_state["current_scene"].location,
+            "status": final_state["current_scene"].status,
+        }
+        if final_state.get("current_scene")
+        else None
+    )
+
+    async def _persist_to_db() -> None:
+        try:
+            await asyncio.gather(
+                update_session_state(
+                    session_id,
+                    scene_count=scene_count,
+                    story_outline=updated_outline,
+                    characters=updated_characters,
+                    world=updated_world,
+                ),
+                save_scene(session_id, _scene_payload) if _scene_payload else asyncio.sleep(0),
+            )
+        except Exception:
+            logger.warning(
+                "Background DB persist failed for session %s — session continues in memory",
+                session_id,
+            )
+
+    asyncio.create_task(_persist_to_db())
+
     # Visual layer: stream the scene illustration, reusing the saved style guide.
+    # Prior continuity notes steer this render on-style; new drift is recorded for
+    # the following scene (feed-forward — the shown image is never re-rendered).
     style_guide = updated_outline.get("visual_style_guide", "")
+    visual_notes = session.setdefault("visual_continuity_notes", [])
     await generate_scene_visual(
         websocket,
         session_id,
@@ -588,9 +759,76 @@ async def handle_make_choice(
         world=final_state.get("world"),
         img_model=img_model,
         img_quality=img_quality,
+        continuity_notes=list(visual_notes),
+        notes_sink=visual_notes,
     )
 
     return session
+
+
+async def handle_review_story(
+    websocket: WebSocket,
+    session_id: str,
+    session: Optional[dict[str, Any]],
+) -> None:
+    """
+    Run a holistic Story Review on the completed story and send the result back.
+
+    Uses the connection-scoped session cache (or falls back to a DB load on
+    reconnect).  Sends ``review_started`` immediately so the client can show
+    a loading state, then sends ``story_review`` with the full analysis.
+    """
+    if not session:
+        session = await get_session(session_id)
+    if not session:
+        await send_message(websocket, "error", {"message": "Session not found — cannot review."})
+        return
+
+    try:
+        await send_message(websocket, "review_started", {})
+        review = await run_story_reviewer(
+            story_outline=session.get("story_outline") or {},
+            characters=session.get("characters") or [],
+            world=session.get("world"),
+            scene_history=session.get("scene_history") or [],
+            user_idea=session.get("user_idea", ""),
+        )
+        await send_message(websocket, "story_review", {"review": review})
+    except Exception as exc:
+        logger.exception("Story review failed for session %s", session_id)
+        await send_message(
+            websocket,
+            "error",
+            {"message": f"Story review failed: {exc}"},
+        )
+
+
+async def handle_resume_story(
+    websocket: WebSocket, payload: dict[str, Any], session_id: str
+) -> Optional[dict[str, Any]]:
+    """
+    Re-attach a previous story so the player can keep choosing after a reload.
+
+    Loads the prior session by id from the store and returns it as the connection's
+    cache, so subsequent make_choice turns continue where the player left off. The
+    client restores its own view from localStorage; this just rehydrates the backend.
+    """
+    old_id = payload.get("session_id")
+    if not isinstance(old_id, str) or not old_id:
+        await send_message(websocket, "error", {"message": "resume_story requires a 'session_id'."})
+        return None
+    loaded = await get_session(old_id)
+    if not loaded:
+        await send_message(
+            websocket,
+            "resume_failed",
+            {"message": "This story is no longer available to continue."},
+        )
+        return None
+    loaded.setdefault("next_scene_guidance", [])
+    loaded.setdefault("visual_continuity_notes", [])
+    await send_message(websocket, "resumed", {"session_id": old_id})
+    return loaded
 
 
 # ---------------------------------------------------------------------------
@@ -670,13 +908,29 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 session = await handle_start_story(websocket, payload, session_id)
             elif message_type == "make_choice":
                 session = await handle_make_choice(websocket, payload, session_id, session)
+            elif message_type == "review_story":
+                await handle_review_story(websocket, session_id, session)
+            elif message_type == "resume_story":
+                session = await handle_resume_story(websocket, payload, session_id)
+            elif message_type == "cancel_story":
+                # Drop the connection's cached story (e.g. the user restarted). Can't
+                # interrupt generation already in flight — the loop is busy until it
+                # returns — but prevents an abandoned story from being continued.
+                session = None
+                await send_message(websocket, "cancelled", {})
             else:
                 await send_message(
                     websocket,
                     "error",
                     {
                         "message": f"Unknown message type: {message_type}",
-                        "supported_types": ["start_story", "make_choice"],
+                        "supported_types": [
+                            "start_story",
+                            "make_choice",
+                            "review_story",
+                            "resume_story",
+                            "cancel_story",
+                        ],
                     },
                 )
 

@@ -13,7 +13,7 @@ import re
 from dotenv import load_dotenv
 
 from graph.state import NarrativeState, StoryOutline
-from llm.fal_llm import complete as fal_complete
+from llm.fal_llm import complete as fal_complete, FAST_LLM_MODEL
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -105,6 +105,8 @@ async def run_orchestrator(state: NarrativeState) -> NarrativeState:
             system_prompt=SYSTEM_PROMPT,
             prompt=f"User story idea:\n{user_idea}",
             temperature=0.3,
+            model=FAST_LLM_MODEL,  # outline is a tiny JSON — no need for the prose tier
+            max_tokens=512,
         )
         story_outline = _parse_outline_json(raw_content)
 

@@ -1,4 +1,10 @@
-import { Aperture } from "lucide-react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { ApertureIcon } from "@hugeicons/core-free-icons";
+
+// Cinema icon shim (lucide → Hugeicons); keeps the call site below unchanged.
+// ponytail: thin alias, not an abstraction — swaps the icon lib with a 1-line diff.
+type IconProps = { className?: string; strokeWidth?: number };
+const Aperture = (p: IconProps) => <HugeiconsIcon icon={ApertureIcon} {...p} />;
 
 /**
  * Displays a generated story image with a cinematic "developing" skeleton while
@@ -41,7 +47,7 @@ export function StoryImage({
           loading="lazy"
           width={width}
           height={height}
-          className="h-full w-full animate-fade-in object-cover"
+          className="h-full w-full animate-focus-pull object-cover"
         />
       </div>
     );
@@ -62,8 +68,8 @@ export function StoryImage({
       <div className="pointer-events-none absolute inset-y-0 -inset-x-1/2">
         <div className="animate-sweep h-full w-1/3 bg-gradient-to-r from-transparent via-[color:var(--lavender-soft)] to-transparent opacity-60" />
       </div>
-      {/* Film grain for texture */}
-      <div className="grain absolute inset-0 opacity-70" />
+      {/* Drifting film grain for texture */}
+      <div className="grain animate-film-grain absolute inset-0 opacity-70" />
 
       {/* Centered status mark */}
       <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-4 text-center">

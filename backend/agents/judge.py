@@ -1,7 +1,17 @@
 """
-Judge agent: validates scene and choice quality before presenting them to the player.
+Judge: a structural gate (blocking) plus a forward quality advisor (non-blocking).
 
-Runs after the storyteller and sets ``is_valid`` / ``error_message`` on state.
+  run_gate(state) — local structural checks ONLY (no LLM). The single thing that
+    can block a scene reaching the player: missing scene, wrong choice count,
+    empty fields. Instant.
+
+  review_for_next_scene(scene, choices) — runs AFTER the scene is shown. Local
+    risk flags first, then an LLM verdict only when flags exist. Returns short,
+    actionable guidance that the caller appends to ``next_scene_guidance`` so the
+    NEXT storyteller call avoids the problem. Never blocks or regenerates the
+    current scene.
+
+Feed-forward: the player never waits on quality judgement — it compounds forward.
 """
 
 from __future__ import annotations
@@ -14,7 +24,7 @@ from dataclasses import asdict
 from dotenv import load_dotenv
 
 from graph.state import Choice, NarrativeState, Scene
-from llm.fal_llm import complete as fal_complete
+from llm.fal_llm import complete as fal_complete, FAST_LLM_MODEL
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -25,6 +35,17 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 REQUIRED_CHOICES = 3
+
+# Minimum word count for scene prose to be considered substantial
+_MIN_SCENE_WORDS = 50
+# Minimum word count for a single choice label
+_MIN_CHOICE_WORDS = 3
+# Minimum word count for a consequence description
+_MIN_CONSEQUENCE_WORDS = 5
+# Jaccard similarity threshold above which two choices are flagged as too similar
+_CHOICE_SIMILARITY_THRESHOLD = 0.6
+# Number of leading words used in choice similarity comparison
+_CHOICE_COMPARE_WORDS = 5
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -43,13 +64,13 @@ Evaluate all of the following:
 Respond with a single JSON object only—no markdown fences, no preamble, no explanation.
 Use exactly these keys:
 - "is_valid": boolean (true only if every check passes)
-- "reason": string (brief explanation; if valid, summarize what passed; if invalid, state what failed)
+- "reason": string (if valid, a short summary; if invalid, an ACTIONABLE instruction the writer should follow in the NEXT scene to avoid this — not just what failed)
 
 Example when valid:
 {{"is_valid": true, "reason": "Scene is vivid; three distinct choices with clear consequences."}}
 
 Example when invalid:
-{{"is_valid": false, "reason": "Choices 2 and 3 are too similar."}}"""
+{{"is_valid": false, "reason": "Make the three choices clearly distinct next time — two were near-duplicates."}}"""
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -102,6 +123,70 @@ def _structural_preflight(scene: Scene | None, choices: list[Choice], is_final: 
     return None
 
 
+def _compute_risk_flags(scene: Scene, choices: list[Choice]) -> list[str]:
+    """
+    Cheap local quality checks — no LLM, no I/O.
+
+    Returns a list of flag strings. An empty list means the scene looks clean
+    and can be accepted without an LLM round-trip.
+
+    Checks performed:
+      - scene_too_short     : prose word-count below _MIN_SCENE_WORDS
+      - choice_too_vague    : any choice label below _MIN_CHOICE_WORDS
+      - consequence_too_vague: any consequence below _MIN_CONSEQUENCE_WORDS
+      - format_leak         : JSON/markdown artefacts visible in prose
+      - incomplete_text     : prose does not end with sentence-ending punctuation
+      - choices_too_similar : two or more choices share high Jaccard overlap
+    """
+    flags: list[str] = []
+    scene_text = (scene.scene_text or "").strip()
+
+    # --- Scene prose length ---
+    word_count = len(scene_text.split())
+    if word_count < _MIN_SCENE_WORDS:
+        flags.append("scene_too_short")
+
+    # --- Choice label / consequence length ---
+    for choice in choices:
+        if len((choice.choice_text or "").split()) < _MIN_CHOICE_WORDS:
+            flags.append("choice_too_vague")
+            break  # one flag per category is enough
+
+    for choice in choices:
+        if len((choice.consequence or "").split()) < _MIN_CONSEQUENCE_WORDS:
+            flags.append("consequence_too_vague")
+            break
+
+    # --- Format leak: raw JSON or markdown fences in prose ---
+    if re.search(r"```|^\s*\{", scene_text, re.MULTILINE):
+        flags.append("format_leak")
+
+    # --- Incomplete sentence (no terminal punctuation) ---
+    if not re.search(r"[.!?][\"']?\s*$", scene_text):
+        flags.append("incomplete_text")
+
+    # --- Choice similarity (Jaccard on first N words) ---
+    choice_word_sets = [
+        set((c.choice_text or "").lower().split()[:_CHOICE_COMPARE_WORDS])
+        for c in choices
+    ]
+    similarity_found = False
+    for i in range(len(choice_word_sets)):
+        for j in range(i + 1, len(choice_word_sets)):
+            a, b = choice_word_sets[i], choice_word_sets[j]
+            if a and b:
+                jaccard = len(a & b) / len(a | b)
+                if jaccard > _CHOICE_SIMILARITY_THRESHOLD:
+                    similarity_found = True
+                    break
+        if similarity_found:
+            break
+    if similarity_found:
+        flags.append("choices_too_similar")
+
+    return flags
+
+
 def _parse_judgment_json(raw: str) -> tuple[bool, str]:
     """Parse Claude's JSON verdict into is_valid and reason."""
     text = _strip_json_fences(raw)
@@ -129,79 +214,80 @@ def _parse_judgment_json(raw: str) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
-# Judge node
+# Gate (synchronous, blocking) + forward advisor (async, non-blocking)
 # ---------------------------------------------------------------------------
 
 
-async def run_judge(state: NarrativeState) -> NarrativeState:
+async def run_gate(state: NarrativeState) -> NarrativeState:
     """
-    Evaluate ``current_scene`` and ``choices`` quality via Claude.
+    Structural gate — local checks only, no LLM. The ONLY validation that blocks
+    a scene from reaching the player.
 
-    Sets ``is_valid`` to True with an empty ``error_message`` when approved.
-    Sets ``is_valid`` to False and ``error_message`` to the failure reason otherwise.
+    Catches genuinely-broken output (missing scene, wrong choice count, empty
+    fields) that can't be rendered in the UI. Soft quality is no longer judged
+    here — that moves to :func:`review_for_next_scene`, which runs after the
+    scene is shown and feeds guidance forward.
+
+    Returns state with ``is_valid``/``error_message`` set. On failure the graph's
+    retry logic re-runs the storyteller once (structural errors only, unchanged).
     """
     current_scene = state.get("current_scene")
     choices = state.get("choices") or []
     is_final = state.get("is_final", False)
 
     preflight_error = _structural_preflight(current_scene, choices, is_final)
-    if not preflight_error and is_final:
-        return {
-            **state,
-            "is_valid": True,
-            "error_message": "",
-        }
     if preflight_error:
-        logger.warning("Judge preflight failed: %s", preflight_error)
-        return {
-            **state,
-            "is_valid": False,
-            "error_message": preflight_error,
-        }
+        logger.warning("Gate failed (structural): %s", preflight_error)
+        return {**state, "is_valid": False, "error_message": preflight_error}
 
-    assert current_scene is not None  # narrowed after preflight
+    logger.info(
+        "Gate passed for session %s (is_final=%s).",
+        state.get("session_id", ""),
+        is_final,
+    )
+    return {**state, "is_valid": True, "error_message": ""}
+
+
+async def review_for_next_scene(
+    scene: Scene | None, choices: list[Choice]
+) -> str | None:
+    """
+    Forward quality review — runs AFTER the scene is shown; never blocks it.
+
+    Two phases, both advisory:
+      1. Local risk flags (no LLM). Empty → clean → return None.
+      2. LLM verdict only when flags exist. If the verdict is invalid, return a
+         short, actionable guidance string; the caller appends it to
+         ``next_scene_guidance`` so the storyteller avoids it on the next scene.
+
+    Returns None when clean — or on ANY error (fail open; guidance is best-effort
+    and must never break the turn).
+    """
+    if scene is None:
+        return None
+
+    risk_flags = _compute_risk_flags(scene, choices)
+    if not risk_flags:
+        return None
 
     try:
         raw_content = await fal_complete(
             system_prompt=SYSTEM_PROMPT,
             prompt=(
                 "Evaluate this scene and choices:\n"
-                f"{_format_scene_and_choices(current_scene, choices)}"
+                f"{_format_scene_and_choices(scene, choices)}"
             ),
             temperature=0.2,
+            model=FAST_LLM_MODEL,  # a short verdict JSON — keep it cheap
+            max_tokens=512,
         )
         is_valid, reason = _parse_judgment_json(raw_content)
-
-        logger.info(
-            "Judge for session %s: is_valid=%s",
-            state.get("session_id", ""),
-            is_valid,
-        )
-
-        return {
-            **state,
-            "is_valid": is_valid,
-            "error_message": "" if is_valid else reason,
-        }
-
-    except json.JSONDecodeError as exc:
-        logger.error("Judge JSON parse failed: %s", exc)
-        return {
-            **state,
-            "is_valid": False,
-            "error_message": f"Could not parse judge response as JSON: {exc}",
-        }
-    except ValueError as exc:
-        logger.error("Judge validation failed: %s", exc)
-        return {
-            **state,
-            "is_valid": False,
-            "error_message": str(exc),
-        }
     except Exception as exc:
-        logger.exception("Judge failed")
-        return {
-            **state,
-            "is_valid": False,
-            "error_message": f"Judge error: {exc}",
-        }
+        logger.warning("Forward review failed (no guidance produced): %s", exc)
+        return None
+
+    if is_valid:
+        return None
+
+    logger.info("Forward review flagged scene (flags=%s); guidance: %s", risk_flags, reason)
+    return reason

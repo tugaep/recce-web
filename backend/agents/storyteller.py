@@ -10,6 +10,7 @@ import json
 import logging
 import re
 from dataclasses import asdict
+from typing import Awaitable, Callable, Optional
 
 from dotenv import load_dotenv
 
@@ -21,7 +22,7 @@ from graph.state import (
     StoryOutline,
     WorldInfo,
 )
-from llm.fal_llm import complete as fal_complete
+from llm.fal_llm import complete as fal_complete, complete_stream
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -63,7 +64,8 @@ Rules:
 - Every choice must have both "choice_text" and "consequence".
 - Set "status" to "active" for the new scene.
 - Choices should be meaningfully different and advance the plot toward the outline's conflict.
-- Do not repeat prior scenes verbatim; build on scene history and the player's choice."""
+- Do not repeat prior scenes verbatim; build on scene history and the player's choice.
+- Honor any "continuity_directives": these are fixes flagged when reviewing the previous scene — follow them so the same issue does not recur."""
 
 FINAL_SCENE_PROMPT = """You are the storyteller for an interactive fiction platform.
 
@@ -88,7 +90,8 @@ Rules:
 - The "story_summary" must capture the full arc of the story in 2-3 sentences.
 - Set "status" to "completed" for the final scene.
 - Make the ending memorable and emotionally resonant.
-- Do not leave any plot threads unresolved."""
+- Do not leave any plot threads unresolved.
+- Honor any "continuity_directives" provided: address those flagged issues in this final scene."""
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -104,12 +107,60 @@ def _strip_json_fences(text: str) -> str:
     return text
 
 
+class _SceneTextStreamer:
+    """
+    Extracts the growing value of the first ``"scene_text"`` field from a cumulative
+    LLM JSON output, emitting only the newly-revealed prose (JSON escapes decoded).
+
+    This lets the storyteller keep its single-JSON contract (so choices still parse
+    from the full output) while streaming clean prose to the player as it is written.
+    """
+
+    _ESCAPES = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "/": "/"}
+
+    def __init__(self) -> None:
+        self._started = False
+        self._value_start = -1
+        self._emitted = 0
+
+    def feed(self, raw: str) -> str:
+        """Given the cumulative raw output so far, return newly-revealed prose ("" if none)."""
+        if not self._started:
+            match = re.search(r'"scene_text"\s*:\s*"', raw)
+            if not match:
+                return ""
+            self._started = True
+            self._value_start = match.end()
+
+        decoded: list[str] = []
+        i = self._value_start
+        n = len(raw)
+        while i < n:
+            ch = raw[i]
+            if ch == "\\":
+                if i + 1 >= n:
+                    break  # incomplete escape at the buffer edge — wait for more output
+                decoded.append(self._ESCAPES.get(raw[i + 1], raw[i + 1]))
+                i += 2
+                continue
+            if ch == '"':
+                break  # closing quote → end of the scene_text value
+            decoded.append(ch)
+            i += 1
+
+        full = "".join(decoded)
+        new = full[self._emitted :]
+        self._emitted = len(full)
+        return new
+
+
 def _format_prompt_context(
     outline: StoryOutline,
     characters: list[Character],
     world: WorldInfo,
     user_choice: str,
     scene_history: list[Scene],
+    continuity_directives: list[str] | None = None,
 ) -> str:
     """Build the human message payload for scene generation."""
     is_opening = not user_choice.strip()
@@ -120,6 +171,8 @@ def _format_prompt_context(
         "scene_history": [asdict(scene) for scene in scene_history],
         "user_choice": user_choice.strip() if user_choice.strip() else None,
         "scene_type": "opening" if is_opening else "continuation",
+        # Feed-forward fixes from the previous scene's review (empty on the opening).
+        "continuity_directives": continuity_directives or [],
     }
     return json.dumps(payload, indent=2)
 
@@ -227,7 +280,10 @@ def _invalid_state(state: NarrativeState, message: str) -> NarrativeState:
 # ---------------------------------------------------------------------------
 
 
-async def run_storyteller(state: NarrativeState) -> NarrativeState:
+async def run_storyteller(
+    state: NarrativeState,
+    on_delta: Optional[Callable[[str], Awaitable[None]]] = None,
+) -> NarrativeState:
     """
     Generate the next ``Scene`` and ``choices`` from story context and ``user_choice``.
 
@@ -236,6 +292,11 @@ async def run_storyteller(state: NarrativeState) -> NarrativeState:
 
     When ``is_final`` is True, generates a conclusive ending scene with no
     choices and produces a ``story_summary``.
+
+    When ``on_delta`` is provided, the scene prose is STREAMED: the model output is
+    consumed incrementally and each newly-revealed slice of ``scene_text`` is passed to
+    ``on_delta`` so the player reads it as it's written. Choices still come from the
+    full parsed JSON. Without ``on_delta`` the behaviour is unchanged (one blocking call).
     """
     story_outline = state.get("story_outline")
     if not story_outline:
@@ -256,16 +317,30 @@ async def run_storyteller(state: NarrativeState) -> NarrativeState:
     is_final = state.get("is_final", False)
 
     prompt = FINAL_SCENE_PROMPT if is_final else SYSTEM_PROMPT
+    human = (
+        "Generate the next scene:\n"
+        f"{_format_prompt_context(story_outline, characters, world, user_choice, scene_history, state.get('next_scene_guidance') or [])}"
+    )
 
     try:
-        raw_content = await fal_complete(
-            system_prompt=prompt,
-            prompt=(
-                "Generate the next scene:\n"
-                f"{_format_prompt_context(story_outline, characters, world, user_choice, scene_history)}"
-            ),
-            temperature=0.7,
-        )
+        if on_delta is not None:
+            # Streaming path: consume cumulative output, emit prose as it's revealed.
+            streamer = _SceneTextStreamer()
+            raw_content = ""
+            async for cumulative in complete_stream(
+                system_prompt=prompt, prompt=human, temperature=0.7
+            ):
+                raw_content = cumulative
+                delta = streamer.feed(cumulative)
+                if delta:
+                    try:
+                        await on_delta(delta)
+                    except Exception:
+                        pass  # streaming to the client is best-effort, never fatal
+        else:
+            raw_content = await fal_complete(
+                system_prompt=prompt, prompt=human, temperature=0.7
+            )
 
         if is_final:
             scene, choices, story_summary = _parse_final_scene_response(raw_content)
